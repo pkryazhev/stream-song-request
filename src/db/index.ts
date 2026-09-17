@@ -4,8 +4,7 @@ import { dirname } from 'node:path';
 
 /**
  * Локальное хранилище на node:sqlite (встроен в Node, без зависимостей).
- * Используется для дедупа анонсов ("этот стрим уже анонсирован, второй раз
- * не шлём") и для очереди музыкальных заказов (см. db/musicQueue.ts).
+ * Используется для очереди музыкальных заказов (см. db/musicQueue.ts).
  */
 
 let db: DatabaseSync | undefined;
@@ -15,13 +14,6 @@ export function initDb(path: string): void {
     mkdirSync(dirname(path), { recursive: true });
   }
   db = new DatabaseSync(path);
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS announced_streams (
-      stream_id TEXT PRIMARY KEY,
-      announced_at TEXT NOT NULL
-    )
-  `);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS song_requests (
@@ -46,15 +38,4 @@ export function getDb(): DatabaseSync {
     throw new Error('База данных не инициализирована — вызови initDb() при старте приложения.');
   }
   return db;
-}
-
-export function hasAnnounced(streamId: string): boolean {
-  const row = getDb().prepare('SELECT 1 FROM announced_streams WHERE stream_id = ?').get(streamId);
-  return row !== undefined;
-}
-
-export function markAnnounced(streamId: string): void {
-  getDb()
-    .prepare('INSERT OR IGNORE INTO announced_streams (stream_id, announced_at) VALUES (?, ?)')
-    .run(streamId, new Date().toISOString());
 }

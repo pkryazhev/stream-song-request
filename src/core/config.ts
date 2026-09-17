@@ -38,13 +38,13 @@ function required(name: string): string {
 }
 
 /**
- * Некоторые фичи (Telegram-анонсы, Spotify) целиком опциональны — если их не
- * настраивать, приложение просто работает без них (например, только с
- * YouTube-заказами). Но набор переменных, который их описывает, должен быть
- * заполнен либо целиком, либо не заполнен вовсе: если часть переменных
- * задана, а часть — нет, это почти наверняка недосмотр (например, забыли
- * дописать один токен), и лучше сразу упасть с понятной ошибкой, чем молча
- * работать в каком-то промежуточном, скорее всего сломанном состоянии.
+ * Некоторые фичи (Spotify) целиком опциональны — если их не настраивать,
+ * приложение просто работает без них (например, только с YouTube-заказами).
+ * Но набор переменных, который их описывает, должен быть заполнен либо
+ * целиком, либо не заполнен вовсе: если часть переменных задана, а часть —
+ * нет, это почти наверняка недосмотр (например, забыли дописать один токен),
+ * и лучше сразу упасть с понятной ошибкой, чем молча работать в каком-то
+ * промежуточном, скорее всего сломанном состоянии.
  */
 function resolveOptionalGroup(groupName: string, varNames: string[]): 'unset' | 'set' {
   const setCount = varNames.filter((name) => !!process.env[name]).length;
@@ -75,21 +75,6 @@ if (wasClamped) {
     `SPOTIFY_END_THRESHOLD_MS (${requestedEndOfTrackThresholdMs}) меньше SPOTIFY_POLL_INTERVAL_MS (${spotifyPollIntervalMs}) — при такой связке можно проскочить момент конца трека и пропустить переключение на заказ. Использую ${spotifyEndOfTrackThresholdMs} мс вместо заданного значения.`,
   );
 }
-
-const telegramGroupState = resolveOptionalGroup('Telegram', ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']);
-if (telegramGroupState === 'unset') {
-  logger.warn(
-    'config',
-    'TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID не заданы — анонсы в Telegram отключены, эта часть работать не будет.',
-  );
-}
-const telegram =
-  telegramGroupState === 'set'
-    ? {
-        botToken: required('TELEGRAM_BOT_TOKEN'),
-        chatId: required('TELEGRAM_CHAT_ID'),
-      }
-    : null;
 
 const spotifyGroupState = resolveOptionalGroup('Spotify', [
   'SPOTIFY_CLIENT_ID',
@@ -125,9 +110,7 @@ export const config = {
     clientId: required('TWITCH_CLIENT_ID'),
     clientSecret: required('TWITCH_CLIENT_SECRET'),
     broadcasterLogin: required('TWITCH_BROADCASTER_LOGIN'),
-    pollIntervalMs: Number(process.env.TWITCH_POLL_INTERVAL_MS ?? 60_000),
   },
-  telegram,
   db: {
     path: process.env.DB_PATH ?? './data/stream-companion.sqlite',
   },

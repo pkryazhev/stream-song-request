@@ -6,21 +6,18 @@ test('eventBus доставляет payload подписчику', () => {
   const bus = new TypedEventBus();
   let received: unknown = null;
 
-  bus.on('stream.went_live', (payload) => {
+  bus.on('song.now_playing', (payload) => {
     received = payload;
   });
 
-  bus.emit('stream.went_live', {
-    streamId: '1',
-    broadcasterLogin: 'pavel_streams',
+  bus.emit('song.now_playing', {
     title: 'test',
-    gameName: 'Just Chatting',
-    thumbnailUrl: '',
-    startedAt: new Date().toISOString(),
+    provider: 'youtube',
+    requestedById: '1',
   });
 
   assert.ok(received);
-  assert.equal((received as { streamId: string }).streamId, '1');
+  assert.equal((received as { title: string }).title, 'test');
 });
 
 test('off() отписывает слушателя', () => {
@@ -30,15 +27,12 @@ test('off() отписывает слушателя', () => {
     callCount += 1;
   };
 
-  bus.on('stream.went_live', listener);
-  bus.off('stream.went_live', listener);
-  bus.emit('stream.went_live', {
-    streamId: '2',
-    broadcasterLogin: 'x',
+  bus.on('song.now_playing', listener);
+  bus.off('song.now_playing', listener);
+  bus.emit('song.now_playing', {
     title: 't',
-    gameName: 'g',
-    thumbnailUrl: '',
-    startedAt: 'now',
+    provider: 'youtube',
+    requestedById: '2',
   });
 
   assert.equal(callCount, 0);

@@ -2,8 +2,6 @@ import { config } from './core/config.ts';
 import { logger } from './core/logger.ts';
 import { initDb } from './db/index.ts';
 import { peekNextPending, markPlaying, markDone } from './db/musicQueue.ts';
-import { registerTelegramAdapter } from './integrations/telegram/telegramAdapter.ts';
-import { startStreamWatcher } from './integrations/twitch/streamWatcher.ts';
 import { TwitchChatClient } from './integrations/twitch/chatClient.ts';
 import { createTwitchUserTokenStore } from './integrations/twitch/twitchUserAuth.ts';
 import { createSpotifyUserTokenStore } from './music/spotifyAuth.ts';
@@ -36,20 +34,6 @@ if (config.chat.startWithRequestsPaused) {
     `Заказы музыки запущены в приостановленном состоянии (флаг -s/--pause-requests). Включить — команда "${config.chat.resumeRequestsCommand}" в чате (стример/модератор).`,
   );
 }
-
-// --- Анонс стрима в Telegram ---
-// TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID необязательны (см. config.ts) — если
-// не заданы, эта часть просто не подключается (предупреждение уже залогировано при загрузке конфига).
-if (config.telegram) {
-  registerTelegramAdapter(config.telegram);
-}
-const stopWatcher = startStreamWatcher(config.twitch);
-logger.info(
-  'app',
-  `Слежу за каналом "${config.twitch.broadcasterLogin}", опрос раз в ${Math.round(
-    config.twitch.pollIntervalMs / 1000,
-  )} сек.`,
-);
 
 // --- Заказ музыки ---
 const twitchUserTokens = createTwitchUserTokenStore({
@@ -144,7 +128,6 @@ logger.info('app', `Обработка заказов музыки включе�
 
 function shutdown(): void {
   logger.info('app', 'Останавливаюсь...');
-  stopWatcher();
   orchestrator.stop();
   chatClient.disconnect();
   process.exit(0);

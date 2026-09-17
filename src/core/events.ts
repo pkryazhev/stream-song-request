@@ -4,15 +4,6 @@
  * не зная о существовании других модулей напрямую.
  */
 
-export interface StreamWentLiveEvent {
-  streamId: string;
-  broadcasterLogin: string;
-  title: string;
-  gameName: string;
-  thumbnailUrl: string;
-  startedAt: string;
-}
-
 /** Сырое сообщение из чата Twitch. */
 export interface ChatMessageEvent {
   userId: string;
@@ -51,7 +42,6 @@ export interface SongNowPlayingEvent {
  * события — остальной код не меняется.
  */
 export interface AppEvents {
-  'stream.went_live': StreamWentLiveEvent;
   'chat.message': ChatMessageEvent;
   'chat.reply': ChatReplyEvent;
   'song.queued': SongQueuedEvent;

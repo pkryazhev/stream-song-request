@@ -1,7 +1,7 @@
 {
   "name": "stream-companion",
   "version": "0.1.0",
-  "description": "Личный компаньон для стримов на Twitch: анонсы в Telegram, заказ музыки, работа с файлами.",
+  "description": "Личный компаньон для стримов на Twitch: заказ музыки.",
   "type": "module",
   "engines": {
     "node": ">=22.6.0"
