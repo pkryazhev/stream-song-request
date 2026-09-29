@@ -4,19 +4,14 @@ import { initDb } from './db/index.ts';
 import { peekNextPending, markPlaying, markDone } from './db/musicQueue.ts';
 import { TwitchChatClient } from './integrations/twitch/chatClient.ts';
 import { createTwitchUserTokenStore } from './integrations/twitch/twitchUserAuth.ts';
-import { createSpotifyUserTokenStore } from './music/spotifyAuth.ts';
-import { SpotifyPlaybackController } from './music/spotifyProvider.ts';
 import { registerMusicRequestHandler, type RequestHandlerConfig } from './music/requestHandler.ts';
 import { startPointsRequestMode, disablePointsReward, type PointsModeHandle } from './music/pointsMode.ts';
 import { registerSkipVoteHandler } from './music/skipVoteHandler.ts';
 import { registerCurrentTrackHandler } from './music/currentTrackHandler.ts';
 import { registerRequestsToggleHandler } from './music/requestsToggleHandler.ts';
 import { setRequestsPaused } from './music/requestsGate.ts';
-import { PlaybackOrchestrator, type DefaultPlaylistLoader } from './music/playbackOrchestrator.ts';
-import { playYoutubeUrl } from './music/youtubePlayer.ts';
-import { playYandexTrack } from './music/yandexPlayer.ts';
-import { parseYandexPlayUri, resolveYandexPlayback } from './music/yandexMusicProvider.ts';
-import { fetchYandexPlaylistTracks } from './music/yandexPlaylist.ts';
+import { PlaybackOrchestrator } from './music/playbackOrchestrator.ts';
+import { createSpotifyController, createMpvPlayer, createDefaultPlaylistLoader } from './music/playbackSetup.ts';
 import { peekNextDefaultTrack, removeDefaultTrack, replaceDefaultTracks } from './db/defaultTracks.ts';
 
 // Подстраховка: необработанный reject где-то в цепочке промисов не должен
@@ -129,91 +124,20 @@ if (isPointsMode) {
     });
 }
 
-let spotifyController: SpotifyPlaybackController | null = null;
-if (config.spotify) {
-  const spotifyUserTokens = createSpotifyUserTokenStore({
-    clientId: config.spotify.clientId,
-    clientSecret: config.spotify.clientSecret,
-    tokenFilePath: config.spotify.tokenFilePath,
-  });
-  if (!spotifyUserTokens.load()) {
-    logger.error(
-      'app',
-      `Нет сохранённого Spotify-токена (${config.spotify.tokenFilePath}). Запусти "npm run auth:spotify" перед первым стартом.`,
-    );
-  }
-  spotifyController = new SpotifyPlaybackController(spotifyUserTokens, fetch, config.spotify.deviceName);
-}
+const spotifyController = createSpotifyController();
 
 const orchestrator = new PlaybackOrchestrator(
   spotifyController,
-  {
-    // Всё, что не Spotify, играет mpv: заказы Яндекс Музыки хранятся в
-    // очереди как yandex:track:<id>, остальное — ссылки на YouTube.
-    play: (url) => {
-      const yandexTrackId = parseYandexPlayUri(url);
-      if (yandexTrackId !== null) {
-        const token = config.yandexMusic?.token;
-        if (!token) {
-          // Заказ попал в очередь, пока токен был, а потом его убрали из .env.
-          return {
-            finished: Promise.reject(new Error('Заказ из Яндекс Музыки, но YANDEX_MUSIC_TOKEN не задан')),
-            stop: () => {},
-          };
-        }
-        const targetLufs = config.yandexMusic?.loudnessTargetLufs ?? null;
-        return playYandexTrack(() => resolveYandexPlayback(yandexTrackId, token, targetLufs), config.mpvPath, {
-          volume: config.youtube.volume,
-          audioDevice: config.youtube.audioDevice,
-        });
-      }
-      return playYoutubeUrl(url, config.mpvPath, {
-        playerClient: config.youtube.playerClient,
-        cookiesFromBrowser: config.youtube.cookiesFromBrowser,
-        cookiesFile: config.youtube.cookiesFile,
-        ytdlPath: config.youtube.ytdlPath,
-        forceIpv4: config.youtube.forceIpv4,
-        volume: config.youtube.volume,
-        audioDevice: config.youtube.audioDevice,
-      });
-    },
-  },
+  createMpvPlayer(),
   { peekNextPending, markPlaying, markDone },
   { peekNext: peekNextDefaultTrack, remove: removeDefaultTrack, replaceAll: replaceDefaultTracks },
-  createDefaultPlaylistLoader(),
+  createDefaultPlaylistLoader(spotifyController),
   {
     pollIntervalMs: config.playback.pollIntervalMs,
     shuffleDefaultPlaylist: config.playback.shuffleDefaultPlaylist,
   },
 );
 void orchestrator.start();
-
-/**
- * Откуда брать треки для таблицы дефолтного плейлиста. config.ts гарантирует,
- * что задан не больше чем один плейлист: Spotify (SPOTIFY_DEFAULT_PLAYLIST_URI)
- * или Яндекс Музыка (YANDEX_DEFAULT_PLAYLIST_URL).
- */
-function createDefaultPlaylistLoader(): DefaultPlaylistLoader | null {
-  const yandex = config.yandexMusic;
-  if (yandex?.defaultPlaylist) {
-    const ref = yandex.defaultPlaylist.ref;
-    return () => fetchYandexPlaylistTracks(ref, yandex.token);
-  }
-  const playlistUri = config.spotify?.defaultPlaylistUri;
-  if (spotifyController && playlistUri) {
-    const controller = spotifyController;
-    return async () =>
-      (await controller.fetchPlaylistTracks(playlistUri)).map((t) => ({
-        provider: 'spotify' as const,
-        playUri: t.uri,
-        title: t.title,
-        author: t.artist,
-        durationSec: Math.round(t.durationMs / 1000),
-      }));
-  }
-  logger.warn('app', 'Дефолтный плейлист не задан — между заказами будет тишина.');
-  return null;
-}
 
 // unregister не используется — обработчик живёт всё время работы приложения.
 registerSkipVoteHandler(orchestrator, {

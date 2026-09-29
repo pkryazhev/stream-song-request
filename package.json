@@ -15,6 +15,7 @@
     "auth:twitch-points": "node scripts/twitch-auth.ts --broadcaster",
     "auth:yandex": "node scripts/yandex-auth.ts",
     "whoami:twitch": "node scripts/twitch-user-id.ts",
-    "devices:spotify": "node scripts/spotify-devices.ts"
+    "devices:spotify": "node scripts/spotify-devices.ts",
+    "check:music": "node scripts/music-check.ts"
   }
 }

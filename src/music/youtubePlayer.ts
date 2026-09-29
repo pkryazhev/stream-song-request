@@ -5,6 +5,13 @@ export interface PlaybackSession {
   finished: Promise<void>;
   /** Принудительно остановить (скип). */
   stop: () => void;
+  /**
+   * Резолвится, когда mpv открыл аудиовыход — то есть звук реально пошёл, а
+   * не просто процесс запущен. Если mpv так и не заиграл (упал, остановлен),
+   * не резолвится никогда — ждать его стоит вместе с finished. Есть только у
+   * сессий mpv; нужен проверке перед стримом (scripts/music-check.ts).
+   */
+  audioStarted?: Promise<void>;
 }
 
 /**
@@ -13,6 +20,25 @@ export interface PlaybackSession {
  * в тестах сюда подставляется сам node с простым скриптом.
  */
 const MAX_CAPTURED_OUTPUT = 4000;
+
+// mpv пишет "AO: [wasapi] 48000Hz stereo 2ch float" в момент, когда открыл
+// аудиоустройство и начал выводить звук.
+const MPV_AUDIO_OUTPUT_LINE_RE = /(^|\n)AO: /;
+
+/** См. PlaybackSession.audioStarted. */
+function watchAudioStart(streams: (NodeJS.ReadableStream | null)[]): Promise<void> {
+  return new Promise((resolve) => {
+    for (const stream of streams) {
+      // Хвост прошлого куска — на случай, если строка "AO:" разорвана между кусками.
+      let tail = '';
+      stream?.on('data', (chunk: Buffer) => {
+        const text = tail + chunk.toString('utf8');
+        if (MPV_AUDIO_OUTPUT_LINE_RE.test(text)) resolve();
+        tail = text.slice(-16);
+      });
+    }
+  });
+}
 
 export function spawnPlaybackProcess(command: string, args: string[]): PlaybackSession {
   // Раньше stdio был 'ignore' с флагом --really-quiet у mpv — в случае
@@ -52,6 +78,7 @@ export function spawnPlaybackProcess(command: string, args: string[]): PlaybackS
       stopped = true;
       killProcess(child);
     },
+    audioStarted: watchAudioStart([child.stdout, child.stderr]),
   };
 }
 
@@ -298,5 +325,6 @@ export function spawnYtdlpMpvPipeline(
       killProcess(mpv);
       killProcess(ytdlp);
     },
+    audioStarted: watchAudioStart([mpv.stdout, mpv.stderr]),
   };
 }

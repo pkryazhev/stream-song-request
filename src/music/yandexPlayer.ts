@@ -37,11 +37,14 @@ export function playYandexTrack(
 ): PlaybackSession {
   let stopped = false;
   let inner: PlaybackSession | undefined;
+  let onAudioStarted: () => void = () => {};
+  const audioStarted = new Promise<void>((resolve) => (onAudioStarted = resolve));
 
   const finished = (async () => {
     const playback = await resolvePlayback();
     if (stopped) return;
     inner = spawn(mpvPath, buildMpvUrlArgs(playback, options));
+    void inner.audioStarted?.then(onAudioStarted);
     await inner.finished;
   })();
 
@@ -51,5 +54,6 @@ export function playYandexTrack(
       stopped = true;
       inner?.stop();
     },
+    audioStarted,
   };
 }

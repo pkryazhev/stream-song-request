@@ -267,3 +267,15 @@ test('playYandexTrack: скип во время воспроизведения �
   await session.finished;
   assert.equal(stopped, true);
 });
+
+test('playYandexTrack: audioStarted пробрасывается из сессии mpv', async () => {
+  let startAudio!: () => void;
+  const session = playYandexTrack(async () => ({ streamUrl: 'https://x/y.mp3' }), 'mpv', {}, () => ({
+    finished: new Promise<void>(() => {}),
+    stop: () => {},
+    audioStarted: new Promise<void>((r) => (startAudio = r)),
+  }));
+  await new Promise((r) => setImmediate(r));
+  startAudio();
+  await session.audioStarted;
+});

@@ -169,3 +169,35 @@ test('spawnYtdlpMpvPipeline: stop() останавливает оба проце
   session.stop();
   await session.finished;
 });
+
+test('audioStarted резолвится, когда mpv напечатал "AO: ..." (открыл аудиовыход)', async () => {
+  const session = spawnPlaybackProcess(process.execPath, [
+    '-e',
+    'console.log("● Audio  --aid=1"); console.log("AO: [wasapi] 48000Hz stereo 2ch float"); setTimeout(() => {}, 60000)',
+  ]);
+  await session.audioStarted;
+  session.stop();
+  await session.finished;
+});
+
+test('audioStarted не резолвится, если процесс упал, так и не открыв аудиовыход', async () => {
+  const session = spawnPlaybackProcess(process.execPath, ['-e', 'process.stderr.write("Failed to open x.mp3"); process.exit(2)']);
+  const winner = await Promise.race([
+    session.audioStarted!.then(() => 'audioStarted'),
+    session.finished.then(
+      () => 'finished',
+      () => 'failed',
+    ),
+  ]);
+  assert.equal(winner, 'failed');
+});
+
+test('spawnYtdlpMpvPipeline: audioStarted — по выводу mpv', async () => {
+  const ytdlpArgs = ['-e', 'process.stdout.write("fake audio bytes"); process.exit(0)'];
+  const mpvArgs = ['-e', 'console.log("AO: [null] 44100Hz mono 1ch floatp"); setTimeout(() => {}, 60000)'];
+
+  const session = spawnYtdlpMpvPipeline(process.execPath, ytdlpArgs, process.execPath, mpvArgs);
+  await session.audioStarted;
+  session.stop();
+  await session.finished;
+});
