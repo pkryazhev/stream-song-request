@@ -13,6 +13,7 @@ export interface SkipVoteHandlerConfig {
 export interface SkipableOrchestrator {
   getMode(): 'default' | 'request';
   skip(): boolean;
+  skipDefaultPlaylist(): boolean;
 }
 
 function reply(text: string): void {
@@ -20,25 +21,27 @@ function reply(text: string): void {
 }
 
 /**
- * Подписывает голосование за скип текущего заказа на чат Twitch.
+ * Подписывает голосование за скип текущего трека на чат Twitch — как заказа,
+ * так и трека дефолтного плейлиста (когда очередь заказов пуста).
  *
  * Условие (по требованию): трек скипается сразу, без порога, если команду
- * !skip введёт либо сам стример (ему это может быть нужно даже без веской
- * причины, у него и так есть более удобные способы для Spotify, это скорее
- * для YouTube-заказов, которые иначе не переключить), либо тот же зритель,
- * который этот трек и заказал (это его собственный заказ — разумно, что он
- * может передумать без голосования). Для всех остальных — обычное
- * голосование: наберётся достаточно голосов зрителей — 30% (настраивается)
- * от числа уникальных "активных" в чате (тех, кто писал что-либо за
- * последние activeWindowMs) — а не от общего числа зрителей стрима, которое
- * приложению взять неоткуда.
+ * !skip введёт либо сам стример или модератор канала (по правам на скип
+ * модератор равен стримеру; это скорее для YouTube-заказов, которые иначе не
+ * переключить), либо (только для
+ * заказов) тот же зритель, который этот трек и заказал (это его собственный
+ * заказ — разумно, что он может передумать без голосования; у треков
+ * дефолтного плейлиста заказчика нет, эта льгота на них не распространяется).
+ * Для всех остальных — обычное голосование: наберётся достаточно голосов
+ * зрителей — 30% (настраивается) от числа уникальных "активных" в чате (тех,
+ * кто писал что-либо за последние activeWindowMs) — а не от общего числа
+ * зрителей стрима, которое приложению взять неоткуда.
  *
  * Любое сообщение в чате (не только сама команда) отмечает автора активным —
  * иначе пришлось бы отдельно опрашивать список зрителей чата.
  *
- * Голоса за конкретный заказ (и то, кто его заказал) сбрасываются/
- * обновляются при старте следующего трека (событие song.now_playing,
- * которое оркестратор и так уже эмитит вместе с requestedById).
+ * Голоса за конкретный трек (и то, кто его заказал, если заказал) сбрасываются/
+ * обновляются при старте следующего трека (событие song.now_playing, которое
+ * оркестратор эмитит для каждого трека — и заказа, и дефолтного плейлиста).
  */
 export interface SkipVoteHandlerHandle {
   tracker: SkipVoteTracker;
@@ -58,25 +61,27 @@ export function registerSkipVoteHandler(
     currentRequesterId = payload.requestedById;
   };
 
+  const doSkip = (): boolean =>
+    orchestrator.getMode() === 'request' ? orchestrator.skip() : orchestrator.skipDefaultPlaylist();
+
   const onChatMessage = (msg: ChatMessageEvent): void => {
     tracker.recordActivity(msg.userId);
 
     const [cmd] = msg.text.trim().split(/\s+/);
     if (!cmd || cmd.toLowerCase() !== cfg.commandName.toLowerCase()) return;
 
-    if (orchestrator.getMode() !== 'request') {
-      reply(`@${msg.displayName} сейчас нечего скипать — играет дефолтный плейлист`);
-      return;
-    }
+    const isRequestMode = orchestrator.getMode() === 'request';
 
-    if (msg.isBroadcaster) {
-      if (orchestrator.skip()) {
-        reply('Трек скипнут по команде стримера');
+    if (msg.isBroadcaster || msg.isModerator) {
+      if (doSkip()) {
+        reply(msg.isBroadcaster ? 'Трек скипнут по команде стримера' : 'Трек скипнут по команде модератора');
+      } else {
+        reply(`@${msg.displayName} сейчас нечего скипать`);
       }
       return;
     }
 
-    if (currentRequesterId !== null && msg.userId === currentRequesterId) {
+    if (isRequestMode && currentRequesterId !== null && msg.userId === currentRequesterId) {
       if (orchestrator.skip()) {
         reply(`@${msg.displayName} трек скипнут — это был твой заказ`);
       }
@@ -85,8 +90,10 @@ export function registerSkipVoteHandler(
 
     const passed = tracker.vote(msg.userId);
     if (passed) {
-      if (orchestrator.skip()) {
+      if (doSkip()) {
         reply(`Трек скипнут голосованием (${tracker.voteCount}/${tracker.requiredVotes()})`);
+      } else {
+        reply(`@${msg.displayName} сейчас нечего скипать`);
       }
     } else {
       reply(`@${msg.displayName} голос за скип принят (${tracker.voteCount}/${tracker.requiredVotes()})`);

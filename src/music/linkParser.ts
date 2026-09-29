@@ -1,15 +1,19 @@
 /**
- * Разбор ссылки из команды `!sr <ссылка>`. Принимаются только YouTube и
- * Spotify — всё остальное (включая просто текстовый поисковый запрос)
+ * Разбор ссылки из команды `!sr <ссылка>`. Принимаются только YouTube,
+ * Spotify и Яндекс Музыка — всё остальное (включая просто текстовый поисковый запрос)
  * считается невалидной ссылкой.
  */
 
 export type ParsedRequestLink =
   | { type: 'youtube'; videoId: string }
   | { type: 'spotify'; trackId: string }
+  | { type: 'yandex'; trackId: string }
   | { type: 'invalid' };
 
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com']);
+
+// music.yandex.ru и региональные зеркала (.com, .by, .kz, .uz)
+const YANDEX_MUSIC_HOST_RE = /^music\.yandex\.(ru|com|by|kz|uz)$/;
 
 // YouTube video id — ровно 11 символов из этого набора. Ссылки, especially
 // присланные через чат, иногда приходят с "хвостом" из невидимых юникод-
@@ -70,6 +74,12 @@ export function parseRequestLink(raw: string): ParsedRequestLink {
     // поддерживаем и обычные, и локализованные пути вида /intl-ru/track/<id>
     const match = url.pathname.match(/\/track\/([a-zA-Z0-9]{10,30})/);
     return match ? { type: 'spotify', trackId: match[1] } : { type: 'invalid' };
+  }
+
+  if (YANDEX_MUSIC_HOST_RE.test(host)) {
+    // /album/<albumId>/track/<trackId> и более новый короткий /track/<trackId>
+    const match = url.pathname.match(/^(?:\/album\/\d+)?\/track\/(\d+)/);
+    return match ? { type: 'yandex', trackId: match[1] } : { type: 'invalid' };
   }
 
   return { type: 'invalid' };

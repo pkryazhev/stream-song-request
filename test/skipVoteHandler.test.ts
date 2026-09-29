@@ -9,6 +9,9 @@ const cfg = { commandName: '!skip', thresholdPercent: 30, activeWindowMs: 10 * 6
 class FakeOrchestrator implements SkipableOrchestrator {
   mode: 'default' | 'request' = 'request';
   skipCalls = 0;
+  skipDefaultPlaylistCalls = 0;
+  /** Эмулирует "нечего скипать" в дефолтном режиме, например Spotify не настроен. */
+  defaultPlaylistSkippable = true;
 
   getMode(): 'default' | 'request' {
     return this.mode;
@@ -17,6 +20,11 @@ class FakeOrchestrator implements SkipableOrchestrator {
   skip(): boolean {
     this.skipCalls += 1;
     return this.mode === 'request';
+  }
+
+  skipDefaultPlaylist(): boolean {
+    this.skipDefaultPlaylistCalls += 1;
+    return this.mode === 'default' && this.defaultPlaylistSkippable;
   }
 }
 
@@ -49,6 +57,38 @@ test('broadcaster скипает трек сразу, без учёта поро
     eventBus.emit('chat.message', makeMsg({ isBroadcaster: true }));
     assert.equal(orchestrator.skipCalls, 1);
     assert.match(replies[0], /скипнут/);
+  } finally {
+    unsubscribe();
+    unregister();
+  }
+});
+
+test('модератор скипает трек сразу, как стример, без учёта порога голосования', () => {
+  const orchestrator = new FakeOrchestrator();
+  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    for (let i = 0; i < 10; i += 1) {
+      eventBus.emit('chat.message', makeMsg({ userId: `u${i}`, text: 'привет' }));
+    }
+    eventBus.emit('chat.message', makeMsg({ userId: 'mod-1', isModerator: true }));
+    assert.equal(orchestrator.skipCalls, 1);
+    assert.match(replies[0], /скипнут по команде модератора/);
+  } finally {
+    unsubscribe();
+    unregister();
+  }
+});
+
+test('модератор скипает трек дефолтного плейлиста сразу', () => {
+  const orchestrator = new FakeOrchestrator();
+  orchestrator.mode = 'default';
+  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    eventBus.emit('chat.message', makeMsg({ userId: 'mod-1', isModerator: true }));
+    assert.equal(orchestrator.skipDefaultPlaylistCalls, 1);
+    assert.match(replies[0], /скипнут по команде модератора/);
   } finally {
     unsubscribe();
     unregister();
@@ -93,15 +133,104 @@ test('после накопления достаточного числа гол
   }
 });
 
-test('пока играет дефолтный плейлист — скипать нечего, голос не учитывается', () => {
+test('broadcaster скипает трек дефолтного плейлиста сразу, без учёта порога голосования', () => {
   const orchestrator = new FakeOrchestrator();
   orchestrator.mode = 'default';
   const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
   const { replies, unsubscribe } = collectReplies();
   try {
     eventBus.emit('chat.message', makeMsg({ isBroadcaster: true }));
+    assert.equal(orchestrator.skipDefaultPlaylistCalls, 1);
     assert.equal(orchestrator.skipCalls, 0);
+    assert.match(replies[0], /скипнут по команде стримера/);
+  } finally {
+    unsubscribe();
+    unregister();
+  }
+});
+
+test('зрители могут скипнуть трек дефолтного плейлиста голосованием, как и заказ', () => {
+  const orchestrator = new FakeOrchestrator();
+  orchestrator.mode = 'default';
+  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    for (let i = 0; i < 10; i += 1) {
+      eventBus.emit('chat.message', makeMsg({ userId: `u${i}`, text: 'привет' }));
+    }
+    eventBus.emit('chat.message', makeMsg({ userId: 'u0', text: '!skip' }));
+    eventBus.emit('chat.message', makeMsg({ userId: 'u1', text: '!skip' }));
+    eventBus.emit('chat.message', makeMsg({ userId: 'u2', text: '!skip' }));
+
+    assert.equal(orchestrator.skipDefaultPlaylistCalls, 1);
+    assert.equal(orchestrator.skipCalls, 0);
+    assert.match(replies.at(-1) ?? '', /скипнут голосованием \(3\/3\)/);
+  } finally {
+    unsubscribe();
+    unregister();
+  }
+});
+
+test('заказчик текущего заказа не имеет мгновенного скипа над треками дефолтного плейлиста (у них нет заказчика)', () => {
+  const orchestrator = new FakeOrchestrator();
+  orchestrator.mode = 'default';
+  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    // Раньше 'viewer-1' заказывал трек — но сейчас играет дефолтный плейлист,
+    // мгновенного скипа быть не должно, только обычное голосование.
+    eventBus.emit('song.now_playing', { title: 'First', provider: 'youtube', requestedById: 'viewer-1' });
+    // 10 активных зрителей — порог 3 голоса, одного голоса недостаточно.
+    for (let i = 0; i < 10; i += 1) {
+      eventBus.emit('chat.message', makeMsg({ userId: `u${i}`, text: 'привет' }));
+    }
+
+    eventBus.emit('chat.message', makeMsg({ userId: 'viewer-1', text: '!skip' }));
+
+    assert.equal(orchestrator.skipCalls, 0);
+    assert.equal(orchestrator.skipDefaultPlaylistCalls, 0);
+    assert.match(replies.at(-1) ?? '', /голос за скип принят/);
+  } finally {
+    unsubscribe();
+    unregister();
+  }
+});
+
+test('дефолтный плейлист нечего скипать (например Spotify не настроен) — понятный ответ, а не тишина', () => {
+  const orchestrator = new FakeOrchestrator();
+  orchestrator.mode = 'default';
+  orchestrator.defaultPlaylistSkippable = false;
+  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    eventBus.emit('chat.message', makeMsg({ isBroadcaster: true }));
+    assert.equal(orchestrator.skipDefaultPlaylistCalls, 1);
     assert.match(replies[0], /нечего скипать/);
+  } finally {
+    unsubscribe();
+    unregister();
+  }
+});
+
+test('song.now_playing для трека дефолтного плейлиста тоже сбрасывает накопленные голоса', () => {
+  const orchestrator = new FakeOrchestrator();
+  orchestrator.mode = 'default';
+  const { unregister } = registerSkipVoteHandler(orchestrator, cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    for (let i = 0; i < 10; i += 1) {
+      eventBus.emit('chat.message', makeMsg({ userId: `u${i}`, text: 'привет' }));
+    }
+    eventBus.emit('chat.message', makeMsg({ userId: 'u0', text: '!skip' }));
+    eventBus.emit('chat.message', makeMsg({ userId: 'u1', text: '!skip' }));
+
+    // Дефолтный плейлист сам переключился на новый трек — голоса за предыдущий должны сброситься.
+    eventBus.emit('song.now_playing', { title: 'Next default track', provider: 'spotify', requestedById: null });
+
+    eventBus.emit('chat.message', makeMsg({ userId: 'u2', text: '!skip' }));
+
+    assert.equal(orchestrator.skipDefaultPlaylistCalls, 0);
+    assert.match(replies.at(-1) ?? '', /голос за скип принят \(1\/3\)/);
   } finally {
     unsubscribe();
     unregister();

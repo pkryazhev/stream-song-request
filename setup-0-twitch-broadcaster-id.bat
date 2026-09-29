@@ -1,34 +1,41 @@
 @echo off
-REM РЈР·РЅР°С‘С‚ С‡РёСЃР»РѕРІРѕР№ id РєР°РЅР°Р»Р° Twitch РїРѕ Р»РѕРіРёРЅСѓ вЂ” РЅСѓР¶РµРЅ РґР»СЏ
-REM TWITCH_BROADCASTER_ID РІ .env (СЌС‚Рѕ РЅРµ С‚Рѕ Р¶Рµ СЃР°РјРѕРµ, С‡С‚Рѕ СЃР°Рј Р»РѕРіРёРЅ).
-REM Р—Р°РїСѓСЃРєР°С‚СЊ РЅСѓР¶РЅРѕ СѓР¶Рµ РїРѕСЃР»Рµ С‚РѕРіРѕ, РєР°Рє Р·Р°РїРѕР»РЅРµРЅС‹ TWITCH_CLIENT_ID Рё
-REM TWITCH_CLIENT_SECRET РІ .env.
+REM ENCODING WARNING (keep this comment in plain ASCII, always safe to read):
+REM This file must be saved as Windows-1251 (ANSI/Cyrillic), NOT UTF-8,
+REM with CRLF line endings. cmd.exe's batch parser can corrupt multi-byte
+REM UTF-8 Cyrillic mid-line (even with "chcp 65001"), and LF-only line
+REM endings can make it misparse lines. If you edit this file, re-save it
+REM as Windows-1251 with CRLF.
+REM
+REM Узнаёт числовой id канала Twitch по логину — нужен для
+REM TWITCH_BROADCASTER_ID в .env (это не то же самое, что сам логин).
+REM Запускать нужно уже после того, как заполнены TWITCH_CLIENT_ID и
+REM TWITCH_CLIENT_SECRET в .env.
 
 setlocal
-chcp 65001 >nul
-title stream-companion вЂ” id РєР°РЅР°Р»Р° Twitch
+chcp 1251 >nul
+title stream-companion — id канала Twitch
 cd /d "%~dp0"
 
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [РћС€РёР±РєР°] Node.js РЅРµ РЅР°Р№РґРµРЅ. РЈСЃС‚Р°РЅРѕРІРё РµРіРѕ: https://nodejs.org/
+    echo [Ошибка] Node.js не найден. Установи его: https://nodejs.org/
     echo.
     pause
     exit /b 1
 )
 
 if not exist ".env" (
-    echo [РћС€РёР±РєР°] Р¤Р°Р№Р» .env РЅРµ РЅР°Р№РґРµРЅ вЂ” СЃРЅР°С‡Р°Р»Р° Р·Р°РїСѓСЃС‚Рё start.bat РѕРґРёРЅ СЂР°Р·,
-    echo Р·Р°РїРѕР»РЅРё .env ^(С…РѕС‚СЏ Р±С‹ TWITCH_CLIENT_ID Рё TWITCH_CLIENT_SECRET^)
-    echo Рё С‚РѕР»СЊРєРѕ РїРѕС‚РѕРј РІРѕР·РІСЂР°С‰Р°Р№СЃСЏ СЃСЋРґР°.
+    echo [Ошибка] Файл .env не найден — сначала запусти start.bat один раз,
+    echo заполни .env ^(хотя бы TWITCH_CLIENT_ID и TWITCH_CLIENT_SECRET^)
+    echo и только потом возвращайся сюда.
     echo.
     pause
     exit /b 1
 )
 
-set /p BROADCASTER_LOGIN=Р’РІРµРґРё Р»РѕРіРёРЅ РєР°РЅР°Р»Р° (РєР°Рє РІ twitch.tv/Р»РѕРіРёРЅ) Рё РЅР°Р¶РјРё Enter:
+set /p BROADCASTER_LOGIN=Введи логин канала (как в twitch.tv/логин) и нажми Enter:
 if "%BROADCASTER_LOGIN%"=="" (
-    echo Р›РѕРіРёРЅ РЅРµ РІРІРµРґС‘РЅ, РѕС‚РјРµРЅСЏСЋ.
+    echo Логин не введён, отменяю.
     echo.
     pause
     exit /b 1
@@ -38,6 +45,6 @@ echo.
 call npm run whoami:twitch -- %BROADCASTER_LOGIN%
 
 echo.
-echo РЎРєРѕРїРёСЂСѓР№ РїРѕР»СѓС‡РµРЅРЅС‹Р№ С‡РёСЃР»РѕРІРѕР№ id РІ TWITCH_BROADCASTER_ID РІ С„Р°Р№Р»Рµ .env.
+echo Скопируй полученный числовой id в TWITCH_BROADCASTER_ID в файле .env.
 echo.
 pause

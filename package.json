@@ -12,6 +12,8 @@
     "test": "node --test",
     "auth:spotify": "node scripts/spotify-auth.ts",
     "auth:twitch": "node scripts/twitch-auth.ts",
+    "auth:twitch-points": "node scripts/twitch-auth.ts --broadcaster",
+    "auth:yandex": "node scripts/yandex-auth.ts",
     "whoami:twitch": "node scripts/twitch-user-id.ts",
     "devices:spotify": "node scripts/spotify-devices.ts"
   }

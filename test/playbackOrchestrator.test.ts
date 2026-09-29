@@ -2,519 +2,437 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PlaybackOrchestrator,
+  shuffled,
+  type DefaultTracksLike,
+  type QueueLike,
   type SpotifyPlaybackLike,
   type YoutubePlayerLike,
-  type QueueLike,
 } from '../src/music/playbackOrchestrator.ts';
 import { setRequestsPaused } from '../src/music/requestsGate.ts';
+import { eventBus } from '../src/core/eventBus.ts';
 import type { QueuedSongRequest } from '../src/db/musicQueue.ts';
+import type { DefaultTrack, NewDefaultTrack } from '../src/db/defaultTracks.ts';
+import type { SongNowPlayingEvent, SongProvider } from '../src/core/events.ts';
 
 beforeEach(() => {
   setRequestsPaused(false);
 });
 
-type PlaybackState = {
-  isPlaying: boolean;
-  progressMs: number;
-  durationMs: number;
-  trackUri: string | null;
-  trackTitle?: string | null;
-  trackArtist?: string | null;
-} | null;
-
-/** 'error' в скрипте — эмулирует транзиентный сбой сети (fetch failed / ECONNRESET и т.п.). */
-type ScriptEntry = PlaybackState | 'error';
-
-class FakeSpotify implements SpotifyPlaybackLike {
-  playTrackUriCalls: string[] = [];
-  playContextCalls: string[] = [];
-  pauseCalls = 0;
-  callCount = 0;
-  pauseThrows = false;
-  private scriptIndex = 0;
-  private readonly script: ScriptEntry[];
-
-  constructor(script: ScriptEntry[]) {
-    this.script = script;
-  }
-
-  async getCurrentPlayback(): Promise<PlaybackState> {
-    const value = this.script[Math.min(this.scriptIndex, this.script.length - 1)];
-    this.scriptIndex += 1;
-    this.callCount += 1;
-    if (value === 'error') {
-      throw new Error('fetch failed (эмуляция обрыва сети)');
-    }
-    return value;
-  }
-
-  async playTrackUri(uri: string): Promise<void> {
-    this.playTrackUriCalls.push(uri);
-  }
-
-  async playContext(contextUri: string): Promise<void> {
-    this.playContextCalls.push(contextUri);
-  }
-
-  async pause(): Promise<void> {
-    this.pauseCalls += 1;
-    if (this.pauseThrows) {
-      throw new Error('сбой сети при попытке поставить Spotify на паузу');
-    }
-  }
-}
-
-class FakeYoutubePlayer implements YoutubePlayerLike {
-  playCalls: string[] = [];
+/** mpv: трек "играет", пока тест не вызовет finish() или его не остановят. */
+class FakeMpv implements YoutubePlayerLike {
+  played: string[] = [];
+  stopped: string[] = [];
+  failNext = false;
+  private finishers: Array<() => void> = [];
 
   play(url: string): { finished: Promise<void>; stop: () => void } {
-    this.playCalls.push(url);
-    return { finished: Promise.resolve(), stop: () => {} };
-  }
-}
-
-class FakeQueue implements QueueLike {
-  items: QueuedSongRequest[];
-
-  constructor(items: QueuedSongRequest[]) {
-    this.items = items;
-  }
-
-  peekNextPending(): QueuedSongRequest | undefined {
-    return this.items.find((item) => item.status === 'pending');
-  }
-
-  markPlaying(id: number): void {
-    const item = this.items.find((i) => i.id === id);
-    if (item) item.status = 'playing';
-  }
-
-  markDone(id: number): void {
-    const item = this.items.find((i) => i.id === id);
-    if (item) item.status = 'done';
-  }
-}
-
-function makeRequest(overrides: Partial<QueuedSongRequest> & Pick<QueuedSongRequest, 'id'>): QueuedSongRequest {
-  return {
-    provider: 'spotify',
-    externalId: 'ext',
-    playUri: 'spotify:track:default',
-    title: 'Untitled',
-    author: 'Author',
-    durationSec: 200,
-    requestedById: 'u1',
-    requestedByLogin: 'viewer',
-    status: 'pending',
-    createdAt: new Date().toISOString(),
-    ...overrides,
-  };
-}
-
-const cfg = { defaultPlaylistUri: 'ctx', endOfTrackThresholdMs: 3000, pollIntervalMs: 5 };
-
-test('не переключается на заказ, пока дефолтный трек не подходит к концу', async () => {
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 10_000, durationMs: 300_000, trackUri: 'default' }]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
-
-  await orchestrator.tick();
-
-  assert.equal(spotify.playTrackUriCalls.length, 0);
-  assert.equal(spotify.playContextCalls.length, 0);
-  assert.equal(orchestrator.getMode(), 'default');
-});
-
-test('запускает дефолтный плейлист, если ничего не играет', async () => {
-  const spotify = new FakeSpotify([null]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
-
-  await orchestrator.tick();
-
-  assert.deepEqual(spotify.playContextCalls, ['ctx']);
-});
-
-test('заказ включается вместо следующего трека плейлиста только когда текущий трек почти закончился', async () => {
-  const spotify = new FakeSpotify([
-    { isPlaying: true, progressMs: 298_000, durationMs: 300_000, trackUri: 'default' }, // remaining=2000 <= 3000
-    { isPlaying: false, progressMs: 100_000, durationMs: 100_000, trackUri: 'spotify:track:1' },
-  ]);
-  const queue = new FakeQueue([makeRequest({ id: 1, playUri: 'spotify:track:1', title: 'Requested' })]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), queue, cfg);
-
-  await orchestrator.tick();
-
-  assert.deepEqual(spotify.playTrackUriCalls, ['spotify:track:1']);
-  assert.equal(queue.items[0].status, 'done');
-  assert.equal(orchestrator.getMode(), 'default');
-  assert.deepEqual(spotify.playContextCalls, ['ctx']);
-});
-
-test('несколько заказов обрабатываются строго по очереди (FIFO), разные провайдеры без приоритета', async () => {
-  const spotify = new FakeSpotify([
-    { isPlaying: true, progressMs: 299_000, durationMs: 300_000, trackUri: 'default' },
-    { isPlaying: false, progressMs: 50_000, durationMs: 50_000, trackUri: 'spotify:track:1' },
-  ]);
-  const youtube = new FakeYoutubePlayer();
-  const queue = new FakeQueue([
-    makeRequest({ id: 1, provider: 'spotify', playUri: 'spotify:track:1', title: 'First' }),
-    makeRequest({ id: 2, provider: 'youtube', playUri: 'https://youtu.be/second', title: 'Second' }),
-  ]);
-  const orchestrator = new PlaybackOrchestrator(spotify, youtube, queue, cfg);
-
-  await orchestrator.tick();
-
-  assert.deepEqual(spotify.playTrackUriCalls, ['spotify:track:1']);
-  assert.deepEqual(youtube.playCalls, ['https://youtu.be/second']);
-  assert.equal(queue.items[0].status, 'done');
-  assert.equal(queue.items[1].status, 'done');
-  assert.equal(orchestrator.getMode(), 'default');
-  assert.deepEqual(spotify.playContextCalls, ['ctx']);
-  // Перед вторым (YouTube) заказом Spotify должен быть поставлен на паузу —
-  // иначе дефолтный плейлист продолжает играть поверх YouTube-заказа.
-  assert.equal(spotify.pauseCalls, 1);
-});
-
-test('перед YouTube-заказом Spotify ставится на паузу (иначе играет поверх)', async () => {
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 299_000, durationMs: 300_000, trackUri: 'default' }]);
-  const youtube = new FakeYoutubePlayer();
-  const queue = new FakeQueue([makeRequest({ id: 1, provider: 'youtube', playUri: 'https://youtu.be/only', title: 'Only' })]);
-  const orchestrator = new PlaybackOrchestrator(spotify, youtube, queue, cfg);
-
-  await orchestrator.tick();
-
-  assert.equal(spotify.pauseCalls, 1);
-  assert.deepEqual(youtube.playCalls, ['https://youtu.be/only']);
-  assert.equal(queue.items[0].status, 'done');
-  // После YouTube-заказа снова запускается дефолтный плейлист (уже не на паузе).
-  assert.deepEqual(spotify.playContextCalls, ['ctx']);
-});
-
-test('если Spotify.pause() падает с ошибкой — YouTube-заказ всё равно проигрывается', async () => {
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 299_000, durationMs: 300_000, trackUri: 'default' }]);
-  spotify.pauseThrows = true;
-  const youtube = new FakeYoutubePlayer();
-  const queue = new FakeQueue([makeRequest({ id: 1, provider: 'youtube', playUri: 'https://youtu.be/only', title: 'Only' })]);
-  const orchestrator = new PlaybackOrchestrator(spotify, youtube, queue, cfg);
-
-  await orchestrator.tick();
-
-  assert.equal(spotify.pauseCalls, 1);
-  // Сбой паузы не должен отменять сам YouTube-заказ.
-  assert.deepEqual(youtube.playCalls, ['https://youtu.be/only']);
-  assert.equal(queue.items[0].status, 'done');
-});
-
-test('если трек ещё не подходит к концу, а в очереди есть заказ — планируется точная проверка на момент конца трека, а не следующий обычный опрос', async () => {
-  // Заказ через YouTube — чтобы после переключения не упереться в
-  // отдельный (медленный, с фиксированной первой паузой в pollIntervalMs)
-  // цикл ожидания waitForSpotifyTrackToFinish; тут проверяется именно
-  // сама точная проверка на уровне tick(), а не то, что происходит после неё.
-  const spotify = new FakeSpotify([
-    { isPlaying: true, progressMs: 0, durationMs: 400, trackUri: 'default' }, // remaining=400 > threshold(50) → задержка ~350мс
-    { isPlaying: true, progressMs: 380, durationMs: 400, trackUri: 'default' }, // remaining=20 <= threshold(50) — пора переключаться
-  ]);
-  const youtube = new FakeYoutubePlayer();
-  const queue = new FakeQueue([
-    makeRequest({ id: 1, provider: 'youtube', playUri: 'https://youtu.be/only', title: 'Requested' }),
-  ]);
-  // Специально большой pollIntervalMs — обычный интервал точно не успеет
-  // сработать за время теста, чтобы показать, что срабатывает именно
-  // запланированная точная проверка (через ~350мс = remaining - threshold), а не он.
-  const orchestrator = new PlaybackOrchestrator(spotify, youtube, queue, {
-    defaultPlaylistUri: 'ctx',
-    endOfTrackThresholdMs: 50,
-    pollIntervalMs: 10_000,
-  });
-
-  try {
-    await orchestrator.tick();
-    // Сразу после первого опроса переключения ещё не было.
-    assert.equal(youtube.playCalls.length, 0);
-    assert.equal(queue.items[0].status, 'pending');
-
-    // Ждём чуть больше расчётной задержки — orchestrator сам, без внешнего
-    // вызова tick(), должен опросить Spotify ещё раз и переключиться.
-    await new Promise((resolve) => setTimeout(resolve, 600));
-
-    assert.deepEqual(youtube.playCalls, ['https://youtu.be/only']);
-    assert.equal(queue.items[0].status, 'done');
-  } finally {
-    orchestrator.stop();
-  }
-});
-
-test('если заказов нет — точная проверка не планируется, лишних опросов Spotify не происходит', async () => {
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 0, durationMs: 100, trackUri: 'default' }]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), new FakeQueue([]), {
-    defaultPlaylistUri: 'ctx',
-    endOfTrackThresholdMs: 50,
-    pollIntervalMs: 10_000,
-  });
-
-  try {
-    await orchestrator.tick();
-    assert.equal(spotify.callCount, 1);
-
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    // Нечего подхватывать — не должно быть никаких дополнительных опросов.
-    assert.equal(spotify.callCount, 1);
-  } finally {
-    orchestrator.stop();
-  }
-});
-
-test('stop() отменяет запланированную точную проверку конца трека', async () => {
-  // durationMs=400/threshold=50 → без отмены проверка запланировалась бы
-  // через ~350мс; ждём дольше этого (600мс), чтобы тест реально проверял
-  // отмену, а не просто не успевал дождаться срабатывания.
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 0, durationMs: 400, trackUri: 'default' }]);
-  const queue = new FakeQueue([makeRequest({ id: 1, playUri: 'spotify:track:1', title: 'Requested' })]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), queue, {
-    defaultPlaylistUri: 'ctx',
-    endOfTrackThresholdMs: 50,
-    pollIntervalMs: 10_000,
-  });
-
-  await orchestrator.tick();
-  orchestrator.stop();
-
-  await new Promise((resolve) => setTimeout(resolve, 600));
-  // stop() должен был отменить запланированный таймер — второго опроса не будет.
-  assert.equal(spotify.callCount, 1);
-});
-
-test('транзиентная сетевая ошибка при опросе Spotify не обрывает заказ раньше времени', async () => {
-  const spotify = new FakeSpotify([
-    { isPlaying: true, progressMs: 299_000, durationMs: 300_000, trackUri: 'default' }, // tick: переключение на заказ
-    'error', // первый опрос внутри ожидания конца трека — временный сбой сети
-    { isPlaying: false, progressMs: 50_000, durationMs: 50_000, trackUri: 'spotify:track:1' }, // трек реально закончился
-  ]);
-  const queue = new FakeQueue([makeRequest({ id: 1, playUri: 'spotify:track:1', title: 'Requested' })]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), queue, cfg);
-
-  await orchestrator.tick();
-
-  // Опрос дошёл до реального завершения трека, а не оборвался сразу на первой ошибке.
-  assert.equal(spotify.callCount, 3);
-  assert.equal(queue.items[0].status, 'done');
-  assert.equal(orchestrator.getMode(), 'default');
-  assert.deepEqual(spotify.playContextCalls, ['ctx']);
-});
-
-test('слишком много сбоев сети подряд при опросе Spotify — заказ помечается обработанным, а не зависает навсегда', async () => {
-  const spotify = new FakeSpotify([
-    { isPlaying: true, progressMs: 299_000, durationMs: 300_000, trackUri: 'default' },
-    'error', // все дальнейшие обращения тоже вернут 'error' (последний элемент скрипта)
-  ]);
-  const queue = new FakeQueue([makeRequest({ id: 1, playUri: 'spotify:track:1', title: 'Requested' })]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), queue, cfg);
-
-  await orchestrator.tick();
-
-  assert.equal(queue.items[0].status, 'done');
-  assert.equal(orchestrator.getMode(), 'default');
-  // 1 вызов из tick() + 5 неудачных попыток внутри ожидания (предел MAX_CONSECUTIVE_ERRORS)
-  assert.equal(spotify.callCount, 6);
-});
-
-test('spotify не настроен (null) — заказ из очереди играет сразу, без ожидания "почти конца" (которого не существует)', async () => {
-  const youtube = new FakeYoutubePlayer();
-  const queue = new FakeQueue([makeRequest({ id: 1, provider: 'youtube', playUri: 'https://youtu.be/only', title: 'Only' })]);
-  const orchestrator = new PlaybackOrchestrator(null, youtube, queue, cfg);
-
-  await orchestrator.tick();
-
-  assert.deepEqual(youtube.playCalls, ['https://youtu.be/only']);
-  assert.equal(queue.items[0].status, 'done');
-  assert.equal(orchestrator.getMode(), 'default');
-});
-
-test('spotify не настроен (null) — пустая очередь — tick() ничего не делает и не падает', async () => {
-  const orchestrator = new PlaybackOrchestrator(null, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
-  await orchestrator.tick();
-  assert.equal(orchestrator.getMode(), 'default');
-});
-
-test('spotify не настроен (null) — заказ через Spotify в очереди (не должно случаться в норме) пропускается, а не роняет оркестратор', async () => {
-  const youtube = new FakeYoutubePlayer();
-  const queue = new FakeQueue([
-    makeRequest({ id: 1, provider: 'spotify', playUri: 'spotify:track:orphan', title: 'Orphan' }),
-    makeRequest({ id: 2, provider: 'youtube', playUri: 'https://youtu.be/next', title: 'Next' }),
-  ]);
-  const orchestrator = new PlaybackOrchestrator(null, youtube, queue, cfg);
-
-  await orchestrator.tick();
-
-  assert.equal(queue.items[0].status, 'done'); // пропущен, а не завис навсегда
-  assert.deepEqual(youtube.playCalls, ['https://youtu.be/next']);
-  assert.equal(queue.items[1].status, 'done');
-});
-
-test('skip() вне режима "request" ничего не делает и возвращает false', () => {
-  const spotify = new FakeSpotify([null]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
-  assert.equal(orchestrator.skip(), false);
-});
-
-class ControllableYoutubePlayer implements YoutubePlayerLike {
-  playCalls: string[] = [];
-  stopCalls = 0;
-  private resolveFinished: (() => void) | undefined;
-
-  play(url: string): { finished: Promise<void>; stop: () => void } {
-    this.playCalls.push(url);
-    const finished = new Promise<void>((resolve) => {
-      this.resolveFinished = resolve;
-    });
+    this.played.push(url);
+    if (this.failNext) {
+      this.failNext = false;
+      return { finished: Promise.reject(new Error('mpv упал')), stop: () => {} };
+    }
+    let resolve!: () => void;
+    const finished = new Promise<void>((r) => (resolve = r));
+    this.finishers.push(resolve);
     return {
       finished,
       stop: () => {
-        this.stopCalls += 1;
-        this.resolveFinished?.();
+        this.stopped.push(url);
+        this.finishers = this.finishers.filter((f) => f !== resolve);
+        resolve();
       },
     };
   }
+
+  finish(): void {
+    this.finishers.shift()?.();
+  }
 }
 
-test('skip() останавливает текущий YouTube-заказ — оркестратор сразу переходит дальше', async () => {
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 299_000, durationMs: 300_000, trackUri: 'default' }]);
-  const youtube = new ControllableYoutubePlayer();
-  const queue = new FakeQueue([makeRequest({ id: 1, provider: 'youtube', playUri: 'https://youtu.be/only', title: 'Only' })]);
-  const orchestrator = new PlaybackOrchestrator(spotify, youtube, queue, cfg);
+/** Spotify-устройство: запущенный трек проигрывается за пару опросов. */
+class FakeSpotify implements SpotifyPlaybackLike {
+  calls: string[] = [];
+  private uri: string | null = null;
+  private progress = 0;
 
-  const tickPromise = orchestrator.tick();
-  // Даём микрозадачам прокрутиться, чтобы плеер успел реально "запуститься"
-  // (session.finished ещё не резолвится сам — ждёт нашего skip()).
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(orchestrator.getMode(), 'request');
-  assert.deepEqual(youtube.playCalls, ['https://youtu.be/only']);
+  async playTrackUri(uri: string): Promise<void> {
+    this.calls.push(`play ${uri}`);
+    this.uri = uri;
+    this.progress = 0;
+  }
+  async skipToNext(): Promise<void> {
+    this.calls.push('next');
+  }
+  async pause(): Promise<void> {
+    this.calls.push('pause');
+  }
+  async getCurrentPlayback() {
+    if (!this.uri) return null;
+    const state = { isPlaying: true, progressMs: this.progress, durationMs: 1000, trackUri: this.uri };
+    this.progress += 700; // второй опрос — "осталось меньше 2 с", трек доигрывается
+    return state;
+  }
+}
 
-  assert.equal(orchestrator.skip(), true);
-  await tickPromise;
+class FakeRequests implements QueueLike {
+  private items: QueuedSongRequest[] = [];
+  private nextId = 1;
 
-  assert.equal(youtube.stopCalls, 1);
-  assert.equal(queue.items[0].status, 'done');
-  assert.equal(orchestrator.getMode(), 'default');
+  add(provider: SongProvider, playUri: string, requestedById = 'viewer-1'): void {
+    this.items.push({
+      id: this.nextId++,
+      provider,
+      externalId: playUri,
+      playUri,
+      title: `req ${playUri}`,
+      author: 'someone',
+      durationSec: 100,
+      requestedById,
+      requestedByLogin: 'viewer1',
+      status: 'pending',
+      createdAt: '',
+    });
+    eventBus.emit('song.queued', { title: playUri, provider, position: 1 });
+  }
+  statuses(): string[] {
+    return this.items.map((i) => `${i.playUri}:${i.status}`);
+  }
+  peekNextPending() {
+    return this.items.find((i) => i.status === 'pending');
+  }
+  markPlaying(id: number) {
+    this.items.find((i) => i.id === id)!.status = 'playing';
+  }
+  markDone(id: number) {
+    this.items.find((i) => i.id === id)!.status = 'done';
+  }
+}
+
+class FakeDefaults implements DefaultTracksLike {
+  rows: DefaultTrack[] = [];
+  private nextId = 1;
+  peekNext() {
+    return this.rows[0];
+  }
+  remove(id: number) {
+    this.rows = this.rows.filter((r) => r.id !== id);
+  }
+  replaceAll(tracks: NewDefaultTrack[]) {
+    this.rows = tracks.map((t) => ({ ...t, id: this.nextId++ }));
+  }
+  uris(): string[] {
+    return this.rows.map((r) => r.playUri);
+  }
+}
+
+const def = (n: number, provider: SongProvider = 'yandex'): NewDefaultTrack => ({
+  provider,
+  playUri: provider === 'spotify' ? `spotify:track:d${n}` : `yandex:track:${n}`,
+  title: `Default ${n}`,
+  author: 'Artist',
+  durationSec: 100,
 });
 
-test('skip() прерывает ожидание конца Spotify-трека — не нужно ждать обычного интервала опроса', async () => {
-  const spotify = new FakeSpotify([
-    { isPlaying: true, progressMs: 299_000, durationMs: 300_000, trackUri: 'default' }, // tick: переключение на заказ
-    { isPlaying: true, progressMs: 0, durationMs: 200_000, trackUri: 'spotify:track:1' }, // трек только начался
-  ]);
-  const queue = new FakeQueue([makeRequest({ id: 1, playUri: 'spotify:track:1', title: 'Requested' })]);
-  // Специально большой pollIntervalMs — без skip() тест ждал бы 10с.
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), queue, {
-    defaultPlaylistUri: 'ctx',
-    endOfTrackThresholdMs: 3000,
-    pollIntervalMs: 10_000,
+/** Ждать, пока условие станет истинным (цикл оркестратора асинхронный). */
+async function until(cond: () => boolean, what: string, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`Не дождались: ${what}`);
+    await new Promise((r) => setTimeout(r, 1));
+  }
+}
+
+function setup(
+  opts: {
+    playlist?: NewDefaultTrack[];
+    loader?: () => Promise<NewDefaultTrack[]>;
+    spotify?: FakeSpotify | null;
+    noPlaylist?: boolean;
+    reimportRetryMs?: number;
+  } = {},
+) {
+  const mpv = new FakeMpv();
+  const requests = new FakeRequests();
+  const defaults = new FakeDefaults();
+  const spotify = opts.spotify === undefined ? null : opts.spotify;
+  let loads = 0;
+  const loader = opts.noPlaylist
+    ? null
+    : async () => {
+        loads++;
+        return opts.loader ? opts.loader() : (opts.playlist ?? [def(1), def(2), def(3)]);
+      };
+  const orchestrator = new PlaybackOrchestrator(spotify, mpv, requests, defaults, loader, {
+    pollIntervalMs: 5,
+    shuffleDefaultPlaylist: false,
+    reimportRetryMs: opts.reimportRetryMs ?? 50,
   });
+  const done = orchestrator.start();
+  return { mpv, requests, defaults, spotify, orchestrator, done, loads: () => loads };
+}
 
-  const tickPromise = orchestrator.tick();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(orchestrator.getMode(), 'request');
+test('при старте плейлист загружается в базу; треки играют по порядку и удаляются после проигрывания', async () => {
+  const { mpv, defaults, orchestrator, done } = setup();
+  try {
+    await until(() => mpv.played.length === 1, 'первый дефолтный трек');
+    assert.deepEqual(mpv.played, ['yandex:track:1']);
+    assert.deepEqual(defaults.uris(), ['yandex:track:1', 'yandex:track:2', 'yandex:track:3'], 'удаляется только после проигрывания');
 
-  assert.equal(orchestrator.skip(), true);
-  await tickPromise;
-
-  assert.equal(queue.items[0].status, 'done');
-  assert.equal(orchestrator.getMode(), 'default');
-  assert.deepEqual(spotify.playContextCalls, ['ctx']);
+    mpv.finish();
+    await until(() => mpv.played.length === 2, 'второй дефолтный трек');
+    assert.deepEqual(defaults.uris(), ['yandex:track:2', 'yandex:track:3']);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
 });
 
-test('getCurrentTrack() во время заказа возвращает данные из очереди, без обращения к Spotify', async () => {
-  // YouTube-заказ — session.finished не резолвится сама, ждёт нашего skip(),
-  // поэтому режим 'request' гарантированно ещё активен, когда мы проверяем getCurrentTrack().
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 299_000, durationMs: 300_000, trackUri: 'default' }]);
-  const youtube = new ControllableYoutubePlayer();
-  const queue = new FakeQueue([
-    makeRequest({ id: 1, provider: 'youtube', playUri: 'https://youtu.be/only', title: 'Requested', author: 'Requester Author' }),
-  ]);
-  const orchestrator = new PlaybackOrchestrator(spotify, youtube, queue, cfg);
+test('заказ, пришедший во время дефолтного трека, играет сразу после него; потом плейлист продолжается', async () => {
+  const { mpv, requests, orchestrator, done } = setup();
+  try {
+    await until(() => mpv.played.length === 1, 'дефолтный трек');
+    requests.add('youtube', 'https://yt/a');
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(mpv.played, ['yandex:track:1'], 'дефолтный трек не прерывается');
 
-  const tickPromise = orchestrator.tick();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(orchestrator.getMode(), 'request');
+    mpv.finish();
+    await until(() => mpv.played.length === 2, 'заказ');
+    assert.equal(mpv.played[1], 'https://yt/a');
+    assert.equal(orchestrator.getMode(), 'request');
 
-  const callCountBefore = spotify.callCount;
-  const current = await orchestrator.getCurrentTrack();
-  assert.deepEqual(current, { provider: 'youtube', title: 'Requested', author: 'Requester Author' });
-  // Во время заказа данные уже известны из очереди — лишний опрос Spotify не нужен.
-  assert.equal(spotify.callCount, callCountBefore);
-
-  orchestrator.skip();
-  await tickPromise;
+    mpv.finish();
+    await until(() => mpv.played.length === 3, 'снова плейлист');
+    assert.equal(mpv.played[2], 'yandex:track:2');
+    assert.deepEqual(requests.statuses(), ['https://yt/a:done']);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
 });
 
-test('getCurrentTrack() во время дефолтного плейлиста опрашивает Spotify за названием/исполнителем', async () => {
-  const spotify = new FakeSpotify([
-    { isPlaying: true, progressMs: 10_000, durationMs: 300_000, trackUri: 'default', trackTitle: 'Default Track', trackArtist: 'Default Artist' },
-  ]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
-
-  const current = await orchestrator.getCurrentTrack();
-  assert.deepEqual(current, { provider: 'spotify', title: 'Default Track', author: 'Default Artist' });
+test('несколько заказов подряд — строго по очереди, плейлист ждёт', async () => {
+  const { mpv, requests, orchestrator, done } = setup({ noPlaylist: true });
+  try {
+    requests.add('youtube', 'https://yt/1');
+    requests.add('yandex', 'yandex:track:77');
+    await until(() => mpv.played.length === 1, 'первый заказ');
+    mpv.finish();
+    await until(() => mpv.played.length === 2, 'второй заказ');
+    assert.deepEqual(mpv.played, ['https://yt/1', 'yandex:track:77']);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
 });
 
-test('getCurrentTrack() без Spotify и без активного заказа — null (нечего показывать)', async () => {
-  const orchestrator = new PlaybackOrchestrator(null, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
-  assert.equal(await orchestrator.getCurrentTrack(), null);
+test('пока играть нечего, новый заказ будит цикл сразу (song.queued)', async () => {
+  const { mpv, requests, orchestrator, done } = setup({ noPlaylist: true });
+  try {
+    await new Promise((r) => setTimeout(r, 20));
+    requests.add('youtube', 'https://yt/a');
+    await until(() => mpv.played.length === 1, 'заказ');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
 });
 
-test('getCurrentTrack() — сбой опроса Spotify не падает наружу, возвращает null', async () => {
-  const spotify = new FakeSpotify(['error']);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
-  assert.equal(await orchestrator.getCurrentTrack(), null);
+test('треки прошлого запуска удаляются при старте, даже если плейлист не загрузился или не задан', async () => {
+  for (const variant of ['load-fails', 'no-playlist'] as const) {
+    const mpv = new FakeMpv();
+    const defaults = new FakeDefaults();
+    defaults.replaceAll([def(100), def(101)]); // остались от прошлого запуска
+    const loader =
+      variant === 'no-playlist'
+        ? null
+        : async (): Promise<NewDefaultTrack[]> => {
+            throw new Error('403');
+          };
+    const orchestrator = new PlaybackOrchestrator(null, mpv, new FakeRequests(), defaults, loader, {
+      pollIntervalMs: 5,
+      shuffleDefaultPlaylist: false,
+      reimportRetryMs: 60_000,
+    });
+    const done = orchestrator.start();
+    await new Promise((r) => setTimeout(r, 30));
+    orchestrator.stop();
+    await done;
+    assert.deepEqual(mpv.played, [], `${variant}: старые треки не играют`);
+    assert.deepEqual(defaults.uris(), [], `${variant}: таблица пуста`);
+  }
 });
 
-test('заказы приостановлены (!pr) — tick() не перезапускает дефолтный плейлист', async () => {
-  setRequestsPaused(true);
-  const spotify = new FakeSpotify([null]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
-
-  await orchestrator.tick();
-
-  assert.equal(spotify.playContextCalls.length, 0);
+test('треки кончились — плейлист загружается заново', async () => {
+  const { mpv, orchestrator, done, loads } = setup({ playlist: [def(1)] });
+  try {
+    await until(() => mpv.played.length === 1, 'трек 1');
+    mpv.finish();
+    await until(() => mpv.played.length === 2, 'трек 1 после перезагрузки');
+    assert.deepEqual(mpv.played, ['yandex:track:1', 'yandex:track:1']);
+    assert.equal(loads(), 2);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
 });
 
-test('haltDefaultPlaylist() останавливает дефолтный плейлист, пока играет он (mode === default)', async () => {
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 10_000, durationMs: 300_000, trackUri: 'default' }]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
-
-  await orchestrator.haltDefaultPlaylist();
-
-  assert.equal(spotify.pauseCalls, 1);
+test('плейлист не загрузился — заказы всё равно играют, загрузка повторяется позже', async () => {
+  let fail = true;
+  const { mpv, requests, orchestrator, done, loads } = setup({
+    loader: async () => {
+      if (fail) throw new Error('нет сети');
+      return [def(9)];
+    },
+    reimportRetryMs: 30,
+  });
+  try {
+    requests.add('youtube', 'https://yt/a');
+    await until(() => mpv.played.length === 1, 'заказ');
+    fail = false;
+    mpv.finish();
+    await until(() => mpv.played.length === 2, 'плейлист после повторной загрузки');
+    assert.equal(mpv.played[1], 'yandex:track:9');
+    assert.ok(loads() >= 2);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
 });
 
-test('haltDefaultPlaylist() ничего не делает во время заказа — не должен ставить сам заказ на паузу', async () => {
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 299_000, durationMs: 300_000, trackUri: 'default' }]);
-  const youtube = new ControllableYoutubePlayer();
-  const queue = new FakeQueue([makeRequest({ id: 1, provider: 'youtube', playUri: 'https://youtu.be/only', title: 'Only' })]);
-  const orchestrator = new PlaybackOrchestrator(spotify, youtube, queue, cfg);
-
-  const tickPromise = orchestrator.tick();
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(orchestrator.getMode(), 'request');
-
-  // К этому моменту Spotify уже мог быть поставлен на паузу перед самим
-  // YouTube-заказом (см. playRequestsUntilEmpty) — проверяем, что
-  // haltDefaultPlaylist() не добавляет ещё один вызов паузы поверх этого.
-  const pauseCallsBefore = spotify.pauseCalls;
-  await orchestrator.haltDefaultPlaylist();
-  assert.equal(spotify.pauseCalls, pauseCallsBefore);
-
-  orchestrator.skip();
-  await tickPromise;
+test('скип дефолтного трека удаляет его и включает следующий; skip() для заказа тут не срабатывает', async () => {
+  const { mpv, defaults, orchestrator, done } = setup();
+  try {
+    await until(() => mpv.played.length === 1, 'трек 1');
+    assert.equal(orchestrator.skip(), false);
+    assert.equal(orchestrator.skipDefaultPlaylist(), true);
+    await until(() => mpv.played.length === 2, 'трек 2');
+    assert.deepEqual(mpv.stopped, ['yandex:track:1']);
+    assert.deepEqual(defaults.uris(), ['yandex:track:2', 'yandex:track:3']);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
 });
 
-test('не трогает плеер, когда уже в режиме заказа и tick() дёргается повторно', async () => {
-  const spotify = new FakeSpotify([{ isPlaying: true, progressMs: 0, durationMs: 300_000, trackUri: 'default' }]);
-  const orchestrator = new PlaybackOrchestrator(spotify, new FakeYoutubePlayer(), new FakeQueue([]), cfg);
+test('скип заказа — заказ помечается сыгранным, дальше плейлист', async () => {
+  const { mpv, requests, orchestrator, done } = setup();
+  try {
+    requests.add('youtube', 'https://yt/a');
+    await until(() => mpv.played.length === 1, 'заказ');
+    assert.equal(orchestrator.skipDefaultPlaylist(), false);
+    assert.equal(orchestrator.skip(), true);
+    await until(() => mpv.played.length === 2, 'плейлист');
+    assert.deepEqual(requests.statuses(), ['https://yt/a:done']);
+    assert.equal(mpv.played[1], 'yandex:track:1');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
 
-  // @ts-expect-error — доступ к приватному полю ради теста защиты от гонки
-  orchestrator.mode = 'request';
-  await orchestrator.tick();
+test('!pr: дефолтный трек останавливается и остаётся в базе; принятые заказы доигрываются; после !rr трек начинается заново', async () => {
+  const { mpv, requests, defaults, orchestrator, done } = setup();
+  try {
+    await until(() => mpv.played.length === 1, 'трек 1');
+    setRequestsPaused(true);
+    await orchestrator.haltDefaultPlaylist();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(mpv.played, ['yandex:track:1']);
+    assert.deepEqual(defaults.uris(), ['yandex:track:1', 'yandex:track:2', 'yandex:track:3']);
 
-  assert.equal(spotify.playTrackUriCalls.length, 0);
-  assert.equal(spotify.playContextCalls.length, 0);
+    requests.add('youtube', 'https://yt/accepted-before-pause');
+    await until(() => mpv.played.length === 2, 'уже принятый заказ');
+    mpv.finish();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(mpv.played.length, 2, 'на паузе плейлист не играет');
+
+    setRequestsPaused(false);
+    await orchestrator.tick();
+    await until(() => mpv.played.length === 3, 'плейлист после !rr');
+    assert.equal(mpv.played[2], 'yandex:track:1');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('ошибка воспроизведения: трек пропускается (заказ — done, дефолтный — удалён), цикл идёт дальше', async () => {
+  const { mpv, defaults, orchestrator, done } = setup();
+  try {
+    mpv.failNext = true;
+    await until(() => mpv.played.length === 2, 'следующий трек после сбоя');
+    assert.deepEqual(mpv.played, ['yandex:track:1', 'yandex:track:2']);
+    assert.deepEqual(defaults.uris(), ['yandex:track:2', 'yandex:track:3']);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('song.now_playing: у заказа есть заказчик, у дефолтного трека — null', async () => {
+  const events: SongNowPlayingEvent[] = [];
+  const listener = (e: SongNowPlayingEvent): void => void events.push(e);
+  eventBus.on('song.now_playing', listener);
+  const { mpv, requests, orchestrator, done } = setup();
+  try {
+    await until(() => mpv.played.length === 1, 'трек 1');
+    requests.add('youtube', 'https://yt/a', 'viewer-42');
+    mpv.finish();
+    await until(() => mpv.played.length === 2, 'заказ');
+    assert.deepEqual(
+      events.map((e) => [e.title, e.requestedById]),
+      [
+        ['Default 1', null],
+        ['req https://yt/a', 'viewer-42'],
+      ],
+    );
+    assert.deepEqual(await orchestrator.getCurrentTrack(), {
+      provider: 'youtube',
+      title: 'req https://yt/a',
+      author: 'someone',
+    });
+  } finally {
+    eventBus.off('song.now_playing', listener);
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('Spotify: треки подряд без лишних пауз; перед mpv и когда играть нечего — пауза', async () => {
+  const spotify = new FakeSpotify();
+  const { mpv, requests, orchestrator, done } = setup({
+    spotify,
+    playlist: [def(1, 'spotify'), def(2, 'spotify')],
+  });
+  try {
+    await until(() => spotify.calls.includes('play spotify:track:d2'), 'второй Spotify-трек');
+    requests.add('youtube', 'https://yt/a');
+    await until(() => mpv.played.length === 1, 'YouTube-заказ после Spotify');
+    const beforeMpv = spotify.calls.slice();
+    // Между двумя Spotify-треками паузы нет; перед mpv — есть.
+    assert.deepEqual(beforeMpv.slice(0, 2), ['play spotify:track:d1', 'play spotify:track:d2']);
+    assert.equal(beforeMpv.at(-1), 'pause');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('Spotify-заказ без настроенного Spotify — пропускается, приложение не падает', async () => {
+  const { mpv, requests, orchestrator, done } = setup({ noPlaylist: true });
+  try {
+    requests.add('spotify', 'spotify:track:x');
+    requests.add('youtube', 'https://yt/after');
+    await until(() => mpv.played.length === 1, 'следующий заказ');
+    assert.deepEqual(requests.statuses(), ['spotify:track:x:done', 'https://yt/after:playing']);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('shuffled: перестановка тех же элементов, исходный массив не меняется', () => {
+  const src = [1, 2, 3];
+  assert.deepEqual(shuffled(src, () => 0), [2, 3, 1]);
+  assert.deepEqual(src, [1, 2, 3]);
 });

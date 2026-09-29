@@ -4,7 +4,8 @@ import { dirname } from 'node:path';
 
 /**
  * Локальное хранилище на node:sqlite (встроен в Node, без зависимостей).
- * Используется для очереди музыкальных заказов (см. db/musicQueue.ts).
+ * Используется для очереди музыкальных заказов (см. db/musicQueue.ts) и
+ * небольших настроек, которые нужно помнить между запусками (db/settings.ts).
  */
 
 let db: DatabaseSync | undefined;
@@ -28,7 +29,23 @@ export function initDb(path: string): void {
       requested_by_login TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
       created_at TEXT NOT NULL
-    )
+    );
+
+    -- Треки дефолтного плейлиста (см. db/defaultTracks.ts): заполняется при
+    -- старте, играется сверху вниз, проигранный трек удаляется.
+    CREATE TABLE IF NOT EXISTS default_tracks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      play_uri TEXT NOT NULL,
+      title TEXT NOT NULL,
+      author TEXT NOT NULL,
+      duration_sec INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 }
 

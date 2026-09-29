@@ -71,6 +71,20 @@ test('отсекает невидимый юникод-"хвост" после i
   assert.deepEqual(result, { type: 'youtube', videoId: 'dQw4w9WgXcQ' });
 });
 
+test('распознаёт ссылку music.yandex.ru/album/<id>/track/<id>', () => {
+  const result = parseRequestLink('https://music.yandex.ru/album/5307396/track/38633712?utm_source=desktop');
+  assert.deepEqual(result, { type: 'yandex', trackId: '38633712' });
+});
+
+test('распознаёт короткую ссылку Яндекс Музыки /track/<id> на региональном домене', () => {
+  const result = parseRequestLink('https://music.yandex.com/track/38633712');
+  assert.deepEqual(result, { type: 'yandex', trackId: '38633712' });
+});
+
+test('ссылка на альбом Яндекс Музыки без трека — невалидная', () => {
+  assert.deepEqual(parseRequestLink('https://music.yandex.ru/album/5307396'), { type: 'invalid' });
+});
+
 test('отсекает невидимый юникод-"хвост" после id в shorts', () => {
   const result = parseRequestLink('https://www.youtube.com/shorts/abc123XYZ_-͏');
   assert.deepEqual(result, { type: 'youtube', videoId: 'abc123XYZ_-' });

@@ -1,5 +1,5 @@
 import { normalizeSpotifyPlaylistUri } from '../music/spotifyPlaylistUri.ts';
-import { resolveEndOfTrackThresholdMs } from './spotifyPollTiming.ts';
+import { parseYandexPlaylistUrl, type YandexPlaylistRef } from '../music/yandexPlaylist.ts';
 import { logger } from './logger.ts';
 
 /**
@@ -38,65 +38,130 @@ function required(name: string): string {
 }
 
 /**
- * Некоторые фичи (Spotify) целиком опциональны — если их не настраивать,
- * приложение просто работает без них (например, только с YouTube-заказами).
- * Но набор переменных, который их описывает, должен быть заполнен либо
- * целиком, либо не заполнен вовсе: если часть переменных задана, а часть —
- * нет, это почти наверняка недосмотр (например, забыли дописать один токен),
- * и лучше сразу упасть с понятной ошибкой, чем молча работать в каком-то
- * промежуточном, скорее всего сломанном состоянии.
+ * Источники заказов (YouTube, Spotify, Яндекс Музыка) необязательны по
+ * отдельности: источник, которому не хватает переменных, отключается, а в
+ * лог пишется, чего именно не хватает. true — источник настроен полностью.
  */
-function resolveOptionalGroup(groupName: string, varNames: string[]): 'unset' | 'set' {
-  const setCount = varNames.filter((name) => !!process.env[name]).length;
-  if (setCount === 0) return 'unset';
-  if (setCount === varNames.length) return 'set';
+function checkMusicSource(sourceName: string, varNames: string[], disabledNote: string): boolean {
   const missing = varNames.filter((name) => !process.env[name]);
-  throw new Error(
-    `Группа переменных окружения "${groupName}" заполнена только частично — заданы не все из [${varNames.join(', ')}] ` +
-      `(не хватает: ${missing.join(', ')}). Либо заполни все переменные группы, либо не задавай ни одной — ` +
-      `тогда соответствующая фича будет просто отключена.`,
-  );
+  if (missing.length === 0) {
+    logger.info('config', `${sourceName}: настроено`);
+    return true;
+  }
+  logger.warn('config', `${sourceName}: не заданы ${missing.join(', ')} — ${disabledNote}`);
+  return false;
 }
 
+// Как часто оркестратор опрашивает Spotify, пока играет Spotify-трек (конец
+// трека он всё равно ловит точно, см. spotifyTrackPlayer.ts), и как долго
+// ждёт, когда играть нечего.
 const spotifyPollIntervalMs = Number(process.env.SPOTIFY_POLL_INTERVAL_MS ?? 4000);
-const requestedEndOfTrackThresholdMs = Number(process.env.SPOTIFY_END_THRESHOLD_MS ?? 5000);
-// См. подробное объяснение в spotifyPollTiming.ts — если порог меньше
-// интервала опроса, можно проскочить момент конца трека и пропустить
-// переключение на заказ (очередь как будто "не двигается"). Считается
-// независимо от того, настроен ли Spotify вообще (см. ниже) — это просто
-// параметры цикла оркестратора, а не сама интеграция с Spotify.
-const { value: spotifyEndOfTrackThresholdMs, wasClamped } = resolveEndOfTrackThresholdMs(
-  spotifyPollIntervalMs,
-  requestedEndOfTrackThresholdMs,
-);
-if (wasClamped) {
-  logger.warn(
-    'config',
-    `SPOTIFY_END_THRESHOLD_MS (${requestedEndOfTrackThresholdMs}) меньше SPOTIFY_POLL_INTERVAL_MS (${spotifyPollIntervalMs}) — при такой связке можно проскочить момент конца трека и пропустить переключение на заказ. Использую ${spotifyEndOfTrackThresholdMs} мс вместо заданного значения.`,
+if (!Number.isFinite(spotifyPollIntervalMs) || spotifyPollIntervalMs < 500) {
+  throw new Error(`SPOTIFY_POLL_INTERVAL_MS должен быть числом от 500 (мс), а задано "${process.env.SPOTIFY_POLL_INTERVAL_MS}".`);
+}
+
+// Перемешивать ли дефолтный плейлист (любой — Spotify или Яндекс) при загрузке
+// в базу. Старое имя YANDEX_DEFAULT_PLAYLIST_SHUFFLE тоже понимается.
+const shuffleDefaultPlaylist =
+  (process.env.DEFAULT_PLAYLIST_SHUFFLE ?? process.env.YANDEX_DEFAULT_PLAYLIST_SHUFFLE ?? 'true').trim().toLowerCase() !==
+  'false';
+
+// Режим заказа музыки: командой в чате (!sr) или за баллы канала — только
+// один из двух одновременно, см. MUSIC_REQUEST_MODE в .env.example.
+const requestModeRaw = (process.env.MUSIC_REQUEST_MODE ?? 'command').trim().toLowerCase();
+if (requestModeRaw !== 'command' && requestModeRaw !== 'points') {
+  throw new Error(`MUSIC_REQUEST_MODE должен быть "command" или "points", а задано "${process.env.MUSIC_REQUEST_MODE}".`);
+}
+const requestMode: 'command' | 'points' = requestModeRaw;
+
+const rewardCost = Number(process.env.MUSIC_REWARD_COST ?? 500);
+if (!Number.isInteger(rewardCost) || rewardCost < 1) {
+  throw new Error(`MUSIC_REWARD_COST должен быть целым числом баллов от 1, а задано "${process.env.MUSIC_REWARD_COST}".`);
+}
+
+// Необязательно. OAuth-токен аккаунта Яндекс Музыки с подпиской Плюс (см.
+// .env.example, как его получить). Не задан — ссылки на Яндекс Музыку
+// отклоняются.
+const yandexMusicToken = process.env.YANDEX_MUSIC_TOKEN || undefined;
+
+// Выравнивание громкости треков Яндекс Музыки до уровня нормализации Spotify
+// (см. YANDEX_LOUDNESS_TARGET_LUFS в .env.example). null — выключено.
+const yandexLoudnessRaw = (process.env.YANDEX_LOUDNESS_TARGET_LUFS ?? '-14').trim().toLowerCase();
+const yandexLoudnessTargetLufs = yandexLoudnessRaw === 'off' ? null : Number(yandexLoudnessRaw);
+if (yandexLoudnessTargetLufs !== null && !(yandexLoudnessTargetLufs < 0 && yandexLoudnessTargetLufs >= -40)) {
+  throw new Error(
+    `YANDEX_LOUDNESS_TARGET_LUFS должен быть числом от -40 до 0 (например -14) или "off", ` +
+      `а задано "${process.env.YANDEX_LOUDNESS_TARGET_LUFS}".`,
   );
 }
 
-const spotifyGroupState = resolveOptionalGroup('Spotify', [
-  'SPOTIFY_CLIENT_ID',
-  'SPOTIFY_CLIENT_SECRET',
-  'SPOTIFY_DEFAULT_PLAYLIST_URI',
-]);
-if (spotifyGroupState === 'unset') {
-  logger.warn(
-    'config',
-    'SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET/SPOTIFY_DEFAULT_PLAYLIST_URI не заданы — интеграция со Spotify ' +
-      'отключена, заказ музыки работает только через YouTube-ссылки.',
-  );
+// Необязательно. Дефолтный плейлист из Яндекс Музыки вместо Spotify-плейлиста.
+// Дефолтный плейлист может быть только один: заданы оба — это недосмотр,
+// падаем сразу, а не выбираем за стримера молча.
+const yandexDefaultPlaylistRaw = process.env.YANDEX_DEFAULT_PLAYLIST_URL || undefined;
+let yandexDefaultPlaylist: { ref: YandexPlaylistRef } | null = null;
+if (yandexDefaultPlaylistRaw) {
+  if (process.env.SPOTIFY_DEFAULT_PLAYLIST_URI) {
+    throw new Error(
+      'Заданы сразу YANDEX_DEFAULT_PLAYLIST_URL и SPOTIFY_DEFAULT_PLAYLIST_URI — дефолтный плейлист может быть ' +
+        'только один. Оставь одну из переменных.',
+    );
+  }
+  if (!yandexMusicToken) {
+    throw new Error('YANDEX_DEFAULT_PLAYLIST_URL задан, но нет YANDEX_MUSIC_TOKEN — без токена треки не сыграть.');
+  }
+  const ref = parseYandexPlaylistUrl(yandexDefaultPlaylistRaw);
+  if (!ref) {
+    throw new Error(
+      `YANDEX_DEFAULT_PLAYLIST_URL не похож на ссылку на плейлист Яндекс Музыки: "${yandexDefaultPlaylistRaw}". ` +
+        'Нужна ссылка вида https://music.yandex.ru/playlists/<id> (Поделиться → Скопировать ссылку).',
+    );
+  }
+  yandexDefaultPlaylist = { ref };
 }
+
+// Проверяем источники заказов по очереди. Не настроен ни один — заказывать
+// музыку нечем, и работать дальше бессмысленно: сообщаем и завершаемся.
+const youtubeEnabled = checkMusicSource(
+  'YouTube',
+  ['YOUTUBE_API_KEY'],
+  'заказы по ссылкам на YouTube отключены.',
+);
+// С дефолтным плейлистом из Яндекса Spotify нужен только для Spotify-заказов,
+// и SPOTIFY_DEFAULT_PLAYLIST_URI не требуется (задавать его нельзя, см. выше).
+const spotifyEnabled = checkMusicSource(
+  'Spotify',
+  yandexDefaultPlaylist
+    ? ['SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET']
+    : ['SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET', 'SPOTIFY_DEFAULT_PLAYLIST_URI'],
+  'интеграция со Spotify отключена, ссылки на Spotify и поиск трека по названию не принимаются.',
+);
+const yandexEnabled = checkMusicSource(
+  'Яндекс Музыка',
+  ['YANDEX_MUSIC_TOKEN'],
+  'заказы по ссылкам на Яндекс Музыку отключены.',
+);
+if (!youtubeEnabled && !spotifyEnabled && !yandexEnabled) {
+  logger.error(
+    'config',
+    'Не настроен ни один источник заказов музыки (YouTube, Spotify, Яндекс Музыка) — см. предупреждения выше. ' +
+      'Заполни переменные хотя бы для одного из них в .env (см. .env.example). Приложение завершает работу.',
+  );
+  process.exit(1);
+}
+
 const spotify =
-  spotifyGroupState === 'set'
+  spotifyEnabled
     ? {
         clientId: required('SPOTIFY_CLIENT_ID'),
         clientSecret: required('SPOTIFY_CLIENT_SECRET'),
         tokenFilePath: process.env.SPOTIFY_TOKEN_FILE ?? './data/spotify-token.json',
         // Принимает и https://open.spotify.com/playlist/<id>?si=..., и голый
         // <id>, и spotify:playlist:<id> — см. music/spotifyPlaylistUri.ts
-        defaultPlaylistUri: normalizeSpotifyPlaylistUri(required('SPOTIFY_DEFAULT_PLAYLIST_URI')),
+        // null — дефолтный плейлист из Яндекс Музыки (см. выше).
+        defaultPlaylistUri: yandexDefaultPlaylist
+          ? null
+          : normalizeSpotifyPlaylistUri(required('SPOTIFY_DEFAULT_PLAYLIST_URI')),
         // Необязательно. Точное имя устройства из Spotify Connect (см. "node
         // scripts/spotify-devices.ts"). Если не задано — приложение полагается
         // на то, что у аккаунта уже есть "активное устройство" (см. ошибку
@@ -142,8 +207,29 @@ export const config = {
     // См. cliArgs/startWithRequestsPaused выше — запуск с флагом -s/--pause-requests.
     startWithRequestsPaused,
   },
+  // Заказ музыки за баллы канала (MUSIC_REQUEST_MODE=points) — см.
+  // pointsMode.ts. Правила заказа те же, что у команды.
+  points: {
+    requestMode,
+    // Токен именно стримера (не бота) со скоупом channel:manage:redemptions —
+    // отдельный от чат-токена, см. npm run auth:twitch-points.
+    tokenFilePath: process.env.TWITCH_BROADCASTER_TOKEN_FILE ?? './data/twitch-broadcaster-token.json',
+    // Название/цена/подсказка — только для создания награды; дальше её
+    // настраивают в панели Twitch (см. ensureReward).
+    rewardTitle: process.env.MUSIC_REWARD_TITLE || 'Заказ музыки',
+    rewardCost,
+    rewardPrompt:
+      process.env.MUSIC_REWARD_PROMPT ||
+      `Ссылка на ${[
+        ...(youtubeEnabled ? ['YouTube'] : []),
+        ...(spotify ? ['Spotify'] : []),
+        ...(yandexMusicToken ? ['Яндекс Музыку'] : []),
+      ].join(', ')}${spotify ? ', либо название трека' : ''}. Если заказ не пройдёт — баллы вернутся.`,
+  },
   youtube: {
-    apiKey: required('YOUTUBE_API_KEY'),
+    // undefined — YOUTUBE_API_KEY не задан, заказы по ссылкам на YouTube
+    // отклоняются (воспроизведение через mpv при этом нужно Яндекс Музыке).
+    apiKey: youtubeEnabled ? required('YOUTUBE_API_KEY') : undefined,
     maxDurationSec: Number(process.env.YOUTUBE_MAX_DURATION_SEC ?? 600),
     // Обходит проверку YouTube "Sign in to confirm you're not a bot" и
     // связанные с ней ошибки при локальном воспроизведении через mpv/yt-dlp —
@@ -171,14 +257,13 @@ export const config = {
     audioDevice: process.env.MPV_AUDIO_DEVICE || undefined,
   },
   spotify,
+  yandexMusic: yandexMusicToken
+    ? { token: yandexMusicToken, defaultPlaylist: yandexDefaultPlaylist, loudnessTargetLufs: yandexLoudnessTargetLufs }
+    : null,
   // Параметры цикла оркестратора воспроизведения (см. playbackOrchestrator.ts).
-  // Формально это "настройки под Spotify" (там же и определяются переменные
-  // окружения SPOTIFY_POLL_INTERVAL_MS/SPOTIFY_END_THRESHOLD_MS), но нужны
-  // оркестратору независимо от того, настроен ли Spotify — например, чтобы
-  // знать, как часто проверять очередь заказов в youtube-only режиме.
   playback: {
     pollIntervalMs: spotifyPollIntervalMs,
-    endOfTrackThresholdMs: spotifyEndOfTrackThresholdMs,
+    shuffleDefaultPlaylist,
   },
   mpvPath: process.env.MPV_PATH ?? 'mpv',
 } as const;

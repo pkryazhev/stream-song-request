@@ -4,6 +4,7 @@ import { parseRequestLink } from './linkParser.ts';
 import { fetchYoutubeVideoDetails } from './youtubeProvider.ts';
 import { fetchSpotifyTrackDetails, type SpotifyTrackDetails } from './spotifyProvider.ts';
 import { searchSpotifyTrackByText } from './spotifySearch.ts';
+import { fetchYandexTrackDetails, fetchYandexFullDownloadInfo, yandexPlayUri } from './yandexMusicProvider.ts';
 import { checkFollowerEligibility } from '../integrations/twitch/followerCheck.ts';
 import { enqueueSongRequest } from '../db/musicQueue.ts';
 import { formatTrackTitle } from './trackFormat.ts';
@@ -20,12 +21,62 @@ export interface RequestHandlerConfig {
   commandName: string;
   minFollowerDays: number;
   maxYoutubeDurationSec: number;
-  youtubeApiKey: string;
-  /** undefined — Spotify не настроен, заказы принимаются только по YouTube-ссылкам. */
+  /** undefined — YouTube не настроен (нет YOUTUBE_API_KEY), ссылки на него отклоняются. */
+  youtubeApiKey?: string;
+  /** undefined — Spotify не настроен, ссылки на него и поиск по названию отклоняются. */
   spotify?: SpotifyRequestConfig;
+  /** undefined — Яндекс Музыка не настроена (нет YANDEX_MUSIC_TOKEN), ссылки на неё отклоняются. */
+  yandex?: { token: string };
   twitchClientId: string;
   twitchBroadcasterId: string;
   getTwitchAccessToken: () => Promise<string>;
+  /**
+   * Задано — включён режим заказа за баллы канала (см. pointsRequestHandler.ts),
+   * и команда заказа в чате больше ничего не заказывает, а только подсказывает
+   * название награды. Функция, а не строка: награду могут переименовать в
+   * панели Twitch, и подсказка должна показывать актуальное название.
+   * undefined — обычный режим заказа командой.
+   */
+  getPointsRewardTitle?: () => string;
+}
+
+/**
+ * Откуда сейчас принимаются ссылки, для подсказок в чате: "YouTube, Spotify
+ * или Яндекс Музыку" — только настроенные источники (хотя бы один настроен
+ * всегда, см. config.ts). conjunction — "или" для подсказки, "и" для отказа.
+ */
+export function describeLinkSources(
+  cfg: Pick<RequestHandlerConfig, 'youtubeApiKey' | 'spotify' | 'yandex'>,
+  conjunction: 'и' | 'или',
+): string {
+  const sources: string[] = [];
+  if (cfg.youtubeApiKey) sources.push('YouTube');
+  if (cfg.spotify) sources.push('Spotify');
+  if (cfg.yandex) sources.push('Яндекс Музыку');
+  const last = sources.pop()!;
+  return sources.length ? `${sources.join(', ')} ${conjunction} ${last}` : last;
+}
+
+/** Кто заказывает трек — общее для заказа командой и за баллы канала. */
+export interface SongRequester {
+  userId: string;
+  login: string;
+  displayName: string;
+  isBroadcaster: boolean;
+}
+
+export interface SongRequestOptions {
+  /** Что ответить (после упоминания), если ссылку не указали — у команды и у награды подсказка разная. */
+  emptyArgHint: string;
+  /** Проверять ли стаж фолловинга (MUSIC_MIN_FOLLOWER_DAYS). У заказа за баллы канала — нет. */
+  requireFollower: boolean;
+}
+
+export interface SongRequestOutcome {
+  /** true — трек поставлен в очередь. */
+  queued: boolean;
+  /** Готовый ответ в чат (с упоминанием зрителя). */
+  replyText: string;
 }
 
 function reply(text: string): void {
@@ -56,27 +107,55 @@ export async function handleChatMessage(
   const [cmd, ...rest] = text.split(/\s+/);
   if (!cmd || cmd.toLowerCase() !== cfg.commandName.toLowerCase()) return;
 
-  const mention = `@${msg.displayName}`;
-
-  if (isRequestsPaused()) {
-    reply(`${mention} заказы музыки сейчас недоступны`);
+  if (cfg.getPointsRewardTitle) {
+    reply(`@${msg.displayName} заказ музыки — за баллы канала, награда "${cfg.getPointsRewardTitle()}"`);
     return;
   }
 
-  const arg = rest.join(' ').trim();
+  const outcome = await processSongRequest(
+    msg,
+    rest.join(' '),
+    cfg,
+    { emptyArgHint: `укажи ссылку: ${cfg.commandName} <ссылка на ${describeLinkSources(cfg, 'или')}>`, requireFollower: true },
+    fetchImpl,
+  );
+  reply(outcome.replyText);
+}
+
+/**
+ * Правила заказа — общие для команды в чате и награды за баллы канала:
+ * пауза заказов, валидация ссылки/поиск, лимит длительности; фолловинг —
+ * только если options.requireFollower. Сама в чат не пишет — возвращает
+ * готовый текст ответа, чтобы вызывающий решал, что и когда отправить
+ * (например, награду сначала нужно отклонить в Twitch).
+ */
+export async function processSongRequest(
+  requester: SongRequester,
+  rawArg: string,
+  cfg: RequestHandlerConfig,
+  options: SongRequestOptions,
+  fetchImpl: typeof fetch = fetch,
+): Promise<SongRequestOutcome> {
+  const mention = `@${requester.displayName}`;
+  const rejected = (text: string): SongRequestOutcome => ({ queued: false, replyText: `${mention} ${text}` });
+
+  if (isRequestsPaused()) {
+    return rejected('заказы музыки сейчас недоступны');
+  }
+
+  const arg = rawArg.trim();
 
   if (!arg) {
-    reply(`${mention} укажи ссылку: ${cfg.commandName} <ссылка на YouTube или Spotify>`);
-    return;
+    return rejected(options.emptyArgHint);
   }
 
   // Сам стример не может зафолловить собственный канал, поэтому проверка
   // фолловера для него всегда провалится — пропускаем её для broadcaster'а.
-  if (!msg.isBroadcaster) {
+  if (options.requireFollower && !requester.isBroadcaster) {
     const eligibility = await checkFollowerEligibility(
       {
         broadcasterId: cfg.twitchBroadcasterId,
-        userId: msg.userId,
+        userId: requester.userId,
         clientId: cfg.twitchClientId,
         getAccessToken: cfg.getTwitchAccessToken,
       },
@@ -84,25 +163,31 @@ export async function handleChatMessage(
       fetchImpl,
     );
     if (!eligibility.isEligible) {
-      reply(`${mention} заказывать музыку могут фолловеры канала от ${cfg.minFollowerDays} дн.`);
-      return;
+      return rejected(`заказывать музыку могут фолловеры канала от ${cfg.minFollowerDays} дн.`);
     }
   }
 
   const parsed = parseRequestLink(arg);
 
   if (parsed.type === 'youtube') {
-    await handleYoutubeRequest(parsed.videoId, msg, mention, cfg, fetchImpl);
-    return;
+    if (!cfg.youtubeApiKey) {
+      return rejected('заказ по ссылке на YouTube сейчас недоступен');
+    }
+    return handleYoutubeRequest(parsed.videoId, requester, mention, cfg.youtubeApiKey, cfg, fetchImpl);
   }
 
   if (parsed.type === 'spotify') {
     if (!cfg.spotify) {
-      reply(`${mention} заказ по ссылке на Spotify сейчас недоступен — включён только YouTube`);
-      return;
+      return rejected('заказ по ссылке на Spotify сейчас недоступен');
     }
-    await handleSpotifyRequest(parsed.trackId, msg, mention, cfg.spotify, fetchImpl);
-    return;
+    return handleSpotifyRequest(parsed.trackId, requester, mention, cfg.spotify, fetchImpl);
+  }
+
+  if (parsed.type === 'yandex') {
+    if (!cfg.yandex) {
+      return rejected('заказ по ссылке на Яндекс Музыку сейчас недоступен');
+    }
+    return handleYandexRequest(parsed.trackId, requester, mention, cfg.yandex.token, fetchImpl);
   }
 
   // parsed.type === 'invalid' — это необязательно ошибка: если Spotify
@@ -112,32 +197,33 @@ export async function handleChatMessage(
   if (cfg.spotify) {
     const matched = await searchSpotifyTrackByText(arg, cfg.spotify.clientId, cfg.spotify.clientSecret, fetchImpl);
     if (matched) {
-      enqueueSpotifyTrack(matched, msg, mention);
-      return;
+      return enqueueSpotifyTrack(matched, requester, mention);
     }
   }
 
-  reply(
-    `${mention} ссылка невалидная — принимаются ссылки на YouTube и Spotify` +
+  return rejected(
+    `ссылка невалидная — принимаются ссылки на ${describeLinkSources(cfg, 'и')}` +
       (cfg.spotify ? ', либо название трека для поиска в Spotify' : ''),
   );
 }
 
 async function handleYoutubeRequest(
   videoId: string,
-  msg: ChatMessageEvent,
+  requester: SongRequester,
   mention: string,
+  apiKey: string,
   cfg: RequestHandlerConfig,
   fetchImpl: typeof fetch,
-): Promise<void> {
-  const details = await fetchYoutubeVideoDetails(videoId, cfg.youtubeApiKey, fetchImpl);
+): Promise<SongRequestOutcome> {
+  const details = await fetchYoutubeVideoDetails(videoId, apiKey, fetchImpl);
   if (!details) {
-    reply(`${mention} ссылка невалидная — видео не найдено`);
-    return;
+    return { queued: false, replyText: `${mention} ссылка невалидная — видео не найдено` };
   }
   if (details.durationSec > cfg.maxYoutubeDurationSec) {
-    reply(`${mention} ссылка невалидная — видео длиннее ${Math.round(cfg.maxYoutubeDurationSec / 60)} мин.`);
-    return;
+    return {
+      queued: false,
+      replyText: `${mention} ссылка невалидная — видео длиннее ${Math.round(cfg.maxYoutubeDurationSec / 60)} мин.`,
+    };
   }
 
   const { position } = enqueueSongRequest({
@@ -147,31 +233,33 @@ async function handleYoutubeRequest(
     title: details.title,
     author: details.channelTitle,
     durationSec: details.durationSec,
-    requestedById: msg.userId,
-    requestedByLogin: msg.login,
+    requestedById: requester.userId,
+    requestedByLogin: requester.login,
   });
 
   eventBus.emit('song.queued', { title: details.title, provider: 'youtube', position });
-  reply(`${mention} трек добавлен в очередь: "${formatTrackTitle('youtube', details.title, details.channelTitle)}" (позиция ${position})`);
+  return {
+    queued: true,
+    replyText: `${mention} трек добавлен в очередь: "${formatTrackTitle('youtube', details.title, details.channelTitle)}" (позиция ${position})`,
+  };
 }
 
 async function handleSpotifyRequest(
   trackId: string,
-  msg: ChatMessageEvent,
+  requester: SongRequester,
   mention: string,
   spotifyCfg: SpotifyRequestConfig,
   fetchImpl: typeof fetch,
-): Promise<void> {
+): Promise<SongRequestOutcome> {
   const details = await fetchSpotifyTrackDetails(trackId, spotifyCfg.clientId, spotifyCfg.clientSecret, fetchImpl);
   if (!details) {
-    reply(`${mention} ссылка невалидная — трек не найден`);
-    return;
+    return { queued: false, replyText: `${mention} ссылка невалидная — трек не найден` };
   }
-  enqueueSpotifyTrack(details, msg, mention);
+  return enqueueSpotifyTrack(details, requester, mention);
 }
 
 /** Общий "хвост" постановки в очередь для заказа по ссылке и по текстовому поиску (#6). */
-function enqueueSpotifyTrack(details: SpotifyTrackDetails, msg: ChatMessageEvent, mention: string): void {
+function enqueueSpotifyTrack(details: SpotifyTrackDetails, requester: SongRequester, mention: string): SongRequestOutcome {
   const { position } = enqueueSongRequest({
     provider: 'spotify',
     externalId: details.trackId,
@@ -179,13 +267,51 @@ function enqueueSpotifyTrack(details: SpotifyTrackDetails, msg: ChatMessageEvent
     title: details.title,
     author: details.artist,
     durationSec: Math.round(details.durationMs / 1000),
-    requestedById: msg.userId,
-    requestedByLogin: msg.login,
+    requestedById: requester.userId,
+    requestedByLogin: requester.login,
   });
 
   eventBus.emit('song.queued', { title: details.title, provider: 'spotify', position });
   // В отличие от YouTube, у Spotify-трека почти всегда есть чёткое поле
   // "исполнитель" — показываем его в чате вместе с названием, иначе не
   // всегда понятно, о каком именно треке речь (мало ли каверов/ремиксов).
-  reply(`${mention} трек добавлен в очередь: "${formatTrackTitle('spotify', details.title, details.artist)}" (позиция ${position})`);
+  return {
+    queued: true,
+    replyText: `${mention} трек добавлен в очередь: "${formatTrackTitle('spotify', details.title, details.artist)}" (позиция ${position})`,
+  };
+}
+
+async function handleYandexRequest(
+  trackId: string,
+  requester: SongRequester,
+  mention: string,
+  token: string,
+  fetchImpl: typeof fetch,
+): Promise<SongRequestOutcome> {
+  const details = await fetchYandexTrackDetails(trackId, token, fetchImpl);
+  if (!details) {
+    return { queued: false, replyText: `${mention} ссылка невалидная — трек не найден` };
+  }
+  // Проверяем сразу, а не при воспроизведении: иначе зритель получит
+  // "трек добавлен", а когда до него дойдёт очередь, заказ молча пропустится.
+  if (!details.available || !(await fetchYandexFullDownloadInfo(trackId, token, fetchImpl))) {
+    return { queued: false, replyText: `${mention} этот трек Яндекс Музыки недоступен для прослушивания` };
+  }
+
+  const { position } = enqueueSongRequest({
+    provider: 'yandex',
+    externalId: details.trackId,
+    playUri: yandexPlayUri(details.trackId),
+    title: details.title,
+    author: details.artist,
+    durationSec: details.durationSec,
+    requestedById: requester.userId,
+    requestedByLogin: requester.login,
+  });
+
+  eventBus.emit('song.queued', { title: details.title, provider: 'yandex', position });
+  return {
+    queued: true,
+    replyText: `${mention} трек добавлен в очередь: "${formatTrackTitle('yandex', details.title, details.artist)}" (позиция ${position})`,
+  };
 }

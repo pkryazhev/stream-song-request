@@ -6,5 +6,6 @@ import type { SongProvider } from '../core/events.ts';
  * (currentTrackHandler.ts), чтобы вид не расходился между двумя местами.
  */
 export function formatTrackTitle(provider: SongProvider, title: string, author: string): string {
-  return provider === 'spotify' ? `${author} - ${title}` : title;
+  // У YouTube "автор" — это канал, а не исполнитель, поэтому его не показываем.
+  return provider === 'youtube' ? title : `${author} - ${title}`;
 }

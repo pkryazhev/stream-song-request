@@ -1,0 +1,3 @@
+# Батники должны быть в Windows-1251 с CRLF (см. комментарий в начале каждого .bat).
+# eol=crlf — чтобы git не превратил CRLF в LF при checkout на любой ОС.
+*.bat text eol=crlf

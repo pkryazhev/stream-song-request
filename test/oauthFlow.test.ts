@@ -1,7 +1,18 @@
-import { test } from 'node:test';
+import { test, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { get } from 'node:http';
 import { runAuthorizationCodeFlow } from '../scripts/lib/runAuthorizationCodeFlow.ts';
+
+// runAuthorizationCodeFlow печатает инструкцию (кириллицей) через console.log.
+// Раннер node:test получает результаты тестов через тот же stdout дочернего
+// процесса, и такой вывод при нагрузке изредка ломает ему разбор ("Unable to
+// deserialize cloned data") — тест падает, хотя сами проверки прошли.
+beforeEach(() => {
+  mock.method(console, 'log', () => {});
+});
+afterEach(() => {
+  mock.restoreAll();
+});
 
 function httpGet(url: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {

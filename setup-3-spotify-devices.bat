@@ -1,40 +1,47 @@
 @echo off
-REM РџРѕРєР°Р·С‹РІР°РµС‚ СЃРїРёСЃРѕРє СѓСЃС‚СЂРѕР№СЃС‚РІ Spotify Connect, РІРёРґРёРјС‹С… РґР»СЏ Р°РєРєР°СѓРЅС‚Р° РїСЂСЏРјРѕ
-REM СЃРµР№С‡Р°СЃ вЂ” РЅСѓР¶РЅРѕ, С‡С‚РѕР±С‹ СѓР·РЅР°С‚СЊ С‚РѕС‡РЅРѕРµ РёРјСЏ РґР»СЏ SPOTIFY_DEVICE_NAME РІ .env.
-REM РџРµСЂРµРґ Р·Р°РїСѓСЃРєРѕРј РѕС‚РєСЂРѕР№ Spotify (desktop/mobile/web) РЅР° С‚РѕРј СѓСЃС‚СЂРѕР№СЃС‚РІРµ,
-REM РіРґРµ РґРѕР»Р¶РЅР° РёРіСЂР°С‚СЊ РјСѓР·С‹РєР° вЂ” РёРЅР°С‡Рµ СЃРїРёСЃРѕРє Р±СѓРґРµС‚ РїСѓСЃС‚С‹Рј.
+REM ENCODING WARNING (keep this comment in plain ASCII, always safe to read):
+REM This file must be saved as Windows-1251 (ANSI/Cyrillic), NOT UTF-8,
+REM with CRLF line endings. cmd.exe's batch parser can corrupt multi-byte
+REM UTF-8 Cyrillic mid-line (even with "chcp 65001"), and LF-only line
+REM endings can make it misparse lines. If you edit this file, re-save it
+REM as Windows-1251 with CRLF.
+REM
+REM Показывает список устройств Spotify Connect, видимых для аккаунта прямо
+REM сейчас — нужно, чтобы узнать точное имя для SPOTIFY_DEVICE_NAME в .env.
+REM Перед запуском открой Spotify (desktop/mobile/web) на том устройстве,
+REM где должна играть музыка — иначе список будет пустым.
 
 setlocal
-chcp 65001 >nul
-title stream-companion вЂ” СѓСЃС‚СЂРѕР№СЃС‚РІР° Spotify
+chcp 1251 >nul
+title stream-companion — устройства Spotify
 cd /d "%~dp0"
 
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [РћС€РёР±РєР°] Node.js РЅРµ РЅР°Р№РґРµРЅ. РЈСЃС‚Р°РЅРѕРІРё РµРіРѕ: https://nodejs.org/
+    echo [Ошибка] Node.js не найден. Установи его: https://nodejs.org/
     echo.
     pause
     exit /b 1
 )
 
 if not exist ".env" (
-    echo [РћС€РёР±РєР°] Р¤Р°Р№Р» .env РЅРµ РЅР°Р№РґРµРЅ вЂ” СЃРЅР°С‡Р°Р»Р° Р·Р°РїСѓСЃС‚Рё start.bat РѕРґРёРЅ СЂР°Р·,
-    echo Р·Р°РїРѕР»РЅРё .env Рё С‚РѕР»СЊРєРѕ РїРѕС‚РѕРј РІРѕР·РІСЂР°С‰Р°Р№СЃСЏ СЃСЋРґР°.
+    echo [Ошибка] Файл .env не найден — сначала запусти start.bat один раз,
+    echo заполни .env и только потом возвращайся сюда.
     echo.
     pause
     exit /b 1
 )
 
-echo РћС‚РєСЂРѕР№ Spotify РЅР° СѓСЃС‚СЂРѕР№СЃС‚РІРµ, РіРґРµ РґРѕР»Р¶РЅР° РёРіСЂР°С‚СЊ РјСѓР·С‹РєР°, Рё СѓР±РµРґРёСЃСЊ,
-echo С‡С‚Рѕ РѕРЅ С‚Р°Рј СЂРµР°Р»СЊРЅРѕ Р·Р°РїСѓС‰РµРЅ (РЅРµ РѕР±СЏР·Р°С‚РµР»СЊРЅРѕ С‡С‚Рѕ-С‚Рѕ РёРіСЂР°РµС‚ вЂ” РїСЂРѕСЃС‚Рѕ
-echo РѕС‚РєСЂС‹С‚). Р—Р°С‚РµРј РЅР°Р¶РјРё Р»СЋР±СѓСЋ РєР»Р°РІРёС€Сѓ, С‡С‚РѕР±С‹ РїРѕР»СѓС‡РёС‚СЊ СЃРїРёСЃРѕРє СѓСЃС‚СЂРѕР№СЃС‚РІ.
+echo Открой Spotify на устройстве, где должна играть музыка, и убедись,
+echo что он там реально запущен (не обязательно что-то играет — просто
+echo открыт). Затем нажми любую клавишу, чтобы получить список устройств.
 pause >nul
 echo.
 
 call npm run devices:spotify
 
 echo.
-echo РЎРєРѕРїРёСЂСѓР№ РЅСѓР¶РЅРѕРµ РёРјСЏ СѓСЃС‚СЂРѕР№СЃС‚РІР° РёР· СЃРїРёСЃРєР° РІС‹С€Рµ РІ SPOTIFY_DEVICE_NAME
-echo РІ С„Р°Р№Р»Рµ .env.
+echo Скопируй нужное имя устройства из списка выше в SPOTIFY_DEVICE_NAME
+echo в файле .env.
 echo.
 pause

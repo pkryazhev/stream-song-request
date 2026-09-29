@@ -1,33 +1,40 @@
 @echo off
-REM РћРґРЅРѕСЂР°Р·РѕРІР°СЏ Р°РІС‚РѕСЂРёР·Р°С†РёСЏ Twitch (С‡Р°С‚ + РїСЂРѕРІРµСЂРєР° С„РѕР»Р»РѕРІРµСЂРѕРІ).
-REM РћС‚РєСЂС‹РІР°РµС‚ СЃСЃС‹Р»РєСѓ Р°РІС‚РѕСЂРёР·Р°С†РёРё РІ Р±СЂР°СѓР·РµСЂРµ вЂ” РЅСѓР¶РЅРѕ РѕРґРёРЅ СЂР°Р· СЂР°Р·СЂРµС€РёС‚СЊ
-REM РґРѕСЃС‚СѓРї, РїРѕСЃР»Рµ С‡РµРіРѕ С‚РѕРєРµРЅ СЃ Р°РІС‚РѕРѕР±РЅРѕРІР»РµРЅРёРµРј СЃРѕС…СЂР°РЅРёС‚СЃСЏ РЅР° РґРёСЃРє
-REM (СЃРј. TWITCH_CHAT_TOKEN_FILE РІ .env), Рё Р·Р°РїСѓСЃРєР°С‚СЊ СЌС‚Рѕ СЃРЅРѕРІР° РЅРµ РЅСѓР¶РЅРѕ
-REM (РєСЂРѕРјРµ СЃР»СѓС‡Р°СЏ, РµСЃР»Рё СЃР°Рј СЂРµС€РёС€СЊ РѕС‚РѕР·РІР°С‚СЊ РґРѕСЃС‚СѓРї РІ РЅР°СЃС‚СЂРѕР№РєР°С… Twitch).
+REM ENCODING WARNING (keep this comment in plain ASCII, always safe to read):
+REM This file must be saved as Windows-1251 (ANSI/Cyrillic), NOT UTF-8,
+REM with CRLF line endings. cmd.exe's batch parser can corrupt multi-byte
+REM UTF-8 Cyrillic mid-line (even with "chcp 65001"), and LF-only line
+REM endings can make it misparse lines. If you edit this file, re-save it
+REM as Windows-1251 with CRLF.
+REM
+REM Одноразовая авторизация Twitch (чат + проверка фолловеров).
+REM Открывает ссылку авторизации в браузере — нужно один раз разрешить
+REM доступ, после чего токен с автообновлением сохранится на диск
+REM (см. TWITCH_CHAT_TOKEN_FILE в .env), и запускать это снова не нужно
+REM (кроме случая, если сам решишь отозвать доступ в настройках Twitch).
 
 setlocal
-chcp 65001 >nul
-title stream-companion вЂ” Р°РІС‚РѕСЂРёР·Р°С†РёСЏ Twitch
+chcp 1251 >nul
+title stream-companion — авторизация Twitch
 cd /d "%~dp0"
 
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [РћС€РёР±РєР°] Node.js РЅРµ РЅР°Р№РґРµРЅ. РЈСЃС‚Р°РЅРѕРІРё РµРіРѕ: https://nodejs.org/
+    echo [Ошибка] Node.js не найден. Установи его: https://nodejs.org/
     echo.
     pause
     exit /b 1
 )
 
 if not exist ".env" (
-    echo [РћС€РёР±РєР°] Р¤Р°Р№Р» .env РЅРµ РЅР°Р№РґРµРЅ вЂ” СЃРЅР°С‡Р°Р»Р° Р·Р°РїСѓСЃС‚Рё start.bat РѕРґРёРЅ СЂР°Р·,
-    echo Р·Р°РїРѕР»РЅРё .env Рё С‚РѕР»СЊРєРѕ РїРѕС‚РѕРј РІРѕР·РІСЂР°С‰Р°Р№СЃСЏ СЃСЋРґР°.
+    echo [Ошибка] Файл .env не найден — сначала запусти start.bat один раз,
+    echo заполни .env и только потом возвращайся сюда.
     echo.
     pause
     exit /b 1
 )
 
-echo РЎРµР№С‡Р°СЃ РѕС‚РєСЂРѕРµС‚СЃСЏ СЃС‚СЂР°РЅРёС†Р° Р°РІС‚РѕСЂРёР·Р°С†РёРё Twitch РІ Р±СЂР°СѓР·РµСЂРµ.
-echo Р Р°Р·СЂРµС€Рё РґРѕСЃС‚СѓРї вЂ” РѕРєРЅРѕ Р·Р°РєСЂРѕРµС‚СЃСЏ СЃР°РјРѕ, Р° Р·РґРµСЃСЊ РїРѕСЏРІРёС‚СЃСЏ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ.
+echo Сейчас откроется страница авторизации Twitch в браузере.
+echo Разреши доступ — окно закроется само, а здесь появится подтверждение.
 echo.
 call npm run auth:twitch
 

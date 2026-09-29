@@ -84,25 +84,35 @@ test('SpotifyPlaybackController.getCurrentPlayback парсит состояни
   });
 });
 
-test('SpotifyPlaybackController.playTrackUri отправляет PUT с нужным телом', async () => {
+test('SpotifyPlaybackController.playTrackUri добавляет трек в очередь и переключается на него (queue + next)', async () => {
+  // Реализовано через queue+next, а не через прямой PUT /play с uris — на
+  // некоторых сторонних Connect-устройствах прямой запрос принимается
+  // (HTTP 204), но реально не запускает воспроизведение (см. комментарий в
+  // spotifyProvider.ts). queue+next надёжнее на таких устройствах.
   const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
-  let capturedBody: unknown;
-  let capturedMethod: string | undefined;
-  const fakeFetch = (async (_url: string | URL, init?: RequestInit) => {
-    capturedMethod = init?.method;
-    capturedBody = JSON.parse(String(init?.body));
+  const calls: Array<{ url: string; method: string | undefined }> = [];
+  const fakeFetch = (async (url: string | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), method: init?.method });
     return new Response(null, { status: 204 });
   }) as typeof fetch;
   const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
 
   await controller.playTrackUri('spotify:track:xyz');
-  assert.equal(capturedMethod, 'PUT');
-  assert.deepEqual(capturedBody, { uris: ['spotify:track:xyz'] });
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].method, 'POST');
+  assert.match(calls[0].url, /\/me\/player\/queue\?uri=spotify%3Atrack%3Axyz$/);
+  assert.equal(calls[1].method, 'POST');
+  assert.match(calls[1].url, /\/me\/player\/next$/);
 });
 
-test('playTrackUri без 404 бросает обычную ошибку, без подсказки про устройство', async () => {
+test('playTrackUri: сбой при добавлении в очередь (не 404) бросает обычную ошибку, без подсказки про устройство, и не идёт дальше на next', async () => {
   const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
-  const fakeFetch = (async () => new Response('server error', { status: 500 })) as typeof fetch;
+  let calls = 0;
+  const fakeFetch = (async () => {
+    calls += 1;
+    return new Response('server error', { status: 500 });
+  }) as typeof fetch;
   const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
 
   await assert.rejects(() => controller.playTrackUri('spotify:track:xyz'), (err: Error) => {
@@ -110,17 +120,80 @@ test('playTrackUri без 404 бросает обычную ошибку, без
     assert.doesNotMatch(err.message, /активного устройства/);
     return true;
   });
+  assert.equal(calls, 1);
 });
 
-test('playContext при HTTP 404 добавляет понятную подсказку про активное устройство', async () => {
+test('fetchPlaylistTracks: читает /items постранично, пропускает локальные файлы, подкасты и недоступные треки', async () => {
+  const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
+  const urls: string[] = [];
+  const track = (id: string, extra: object = {}) => ({
+    is_local: false,
+    item: { type: 'track', uri: `spotify:track:${id}`, name: `T${id}`, duration_ms: 1000, artists: [{ name: 'A' }], ...extra },
+  });
+  const fakeFetch = (async (url: string | URL) => {
+    urls.push(String(url));
+    const page2 = String(url).includes('page=2');
+    return new Response(
+      JSON.stringify(
+        page2
+          ? { next: null, items: [track('3')] }
+          : {
+              next: 'https://api.spotify.com/v1/playlists/abc/items?page=2',
+              items: [
+                track('1'),
+                { is_local: true, item: { type: 'track', uri: 'spotify:local:x', name: 'L', duration_ms: 1 } },
+                track('ep', { type: 'episode' }),
+                track('2', { is_playable: false }),
+                { is_local: false, item: null },
+              ],
+            },
+      ),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
+
+  const tracks = await controller.fetchPlaylistTracks('spotify:playlist:abc');
+
+  assert.deepEqual(
+    tracks.map((t) => t.uri),
+    ['spotify:track:1', 'spotify:track:3'],
+  );
+  assert.deepEqual(tracks[0], { uri: 'spotify:track:1', title: 'T1', artist: 'A', durationMs: 1000 });
+  assert.match(urls[0], /\/v1\/playlists\/abc\/items\?/);
+  assert.equal(urls.length, 2);
+});
+
+test('fetchPlaylistTracks: HTTP 403 — подсказка добавить плейлист в медиатеку', async () => {
+  const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
+  const fakeFetch = (async () => new Response('{"error":{"status":403}}', { status: 403 })) as typeof fetch;
+  const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
+
+  await assert.rejects(() => controller.fetchPlaylistTracks('spotify:playlist:abc'), /403.*медиатек/s);
+});
+
+test('SpotifyPlaybackController.skipToNext отправляет POST на /me/player/next', async () => {
+  const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
+  let capturedUrl: string | undefined;
+  let capturedMethod: string | undefined;
+  const fakeFetch = (async (url: string | URL, init?: RequestInit) => {
+    capturedUrl = String(url);
+    capturedMethod = init?.method;
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
+
+  await controller.skipToNext();
+  assert.equal(capturedMethod, 'POST');
+  assert.match(capturedUrl ?? '', /\/me\/player\/next$/);
+});
+
+test('skipToNext при HTTP 404 добавляет понятную подсказку про активное устройство', async () => {
   const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
   const fakeFetch = (async () => new Response('not found', { status: 404 })) as typeof fetch;
   const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch);
 
-  await assert.rejects(
-    () => controller.playContext('spotify:playlist:abc'),
-    /HTTP 404.*активного устройства.*SPOTIFY_DEVICE_NAME/s,
-  );
+  await assert.rejects(() => controller.skipToNext(), /HTTP 404.*активного устройства.*SPOTIFY_DEVICE_NAME/s);
 });
 
 test('listDevices парсит список устройств', async () => {
@@ -144,9 +217,9 @@ test('listDevices парсит список устройств', async () => {
   ]);
 });
 
-test('с заданным deviceName playTrackUri сам находит device_id и подставляет его в запрос', async () => {
+test('с заданным deviceName playTrackUri сам находит device_id и подставляет его в оба запроса (queue и next)', async () => {
   const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
-  let capturedUrl: string | undefined;
+  const capturedUrls: string[] = [];
   const fakeFetch = (async (url: string | URL) => {
     const u = String(url);
     if (u.includes('/devices')) {
@@ -160,7 +233,7 @@ test('с заданным deviceName playTrackUri сам находит device_i
         { status: 200 },
       );
     }
-    capturedUrl = u;
+    capturedUrls.push(u);
     return new Response(null, { status: 204 });
   }) as typeof fetch;
 
@@ -168,7 +241,39 @@ test('с заданным deviceName playTrackUri сам находит device_i
   const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch, 'pavel-pc');
   await controller.playTrackUri('spotify:track:xyz');
 
-  assert.match(capturedUrl ?? '', /device_id=dev-1/);
+  assert.equal(capturedUrls.length, 2);
+  for (const url of capturedUrls) {
+    assert.match(url, /device_id=dev-1/);
+  }
+});
+
+test('device_id кэшируется на короткий срок — playTrackUri не делает два похода за списком устройств подряд', async () => {
+  // Раньше queueTrack() и skipToNext() внутри playTrackUri() каждый сам по
+  // себе резолвил device_id — то есть на один заказ уходило два отдельных
+  // GET /me/player/devices, что добавляло заметную задержку и увеличивало
+  // риск не успеть до естественного конца предыдущего трека (см. README).
+  const fakeUserAuth = { getValidAccessToken: async () => 'user-token' };
+  let devicesCalls = 0;
+  const fakeFetch = (async (url: string | URL) => {
+    const u = String(url);
+    if (u.includes('/devices')) {
+      devicesCalls += 1;
+      return new Response(
+        JSON.stringify({ devices: [{ id: 'dev-1', name: 'PAVEL-PC', is_active: false }] }),
+        { status: 200 },
+      );
+    }
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+
+  const controller = new SpotifyPlaybackController(fakeUserAuth, fakeFetch, 'PAVEL-PC');
+  await controller.playTrackUri('spotify:track:xyz');
+
+  assert.equal(devicesCalls, 1);
+
+  // Повторный вызов сразу после — тоже должен переиспользовать кэш.
+  await controller.skipToNext();
+  assert.equal(devicesCalls, 1);
 });
 
 test('с заданным deviceName, которого нет среди устройств — понятная ошибка со списком доступных', async () => {

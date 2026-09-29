@@ -1,32 +1,39 @@
 @echo off
-REM РћРґРЅРѕСЂР°Р·РѕРІР°СЏ Р°РІС‚РѕСЂРёР·Р°С†РёСЏ Spotify (СѓРїСЂР°РІР»РµРЅРёРµ РІРѕСЃРїСЂРѕРёР·РІРµРґРµРЅРёРµРј).
-REM РќСѓР¶РЅР°, С‚РѕР»СЊРєРѕ РµСЃР»Рё РІ .env Р·Р°РїРѕР»РЅРµРЅР° РіСЂСѓРїРїР° SPOTIFY_* вЂ” РµСЃР»Рё Spotify
-REM РЅРµ РЅР°СЃС‚СЂРѕРµРЅ (Р·Р°РєР°Р· РјСѓР·С‹РєРё СЂР°Р±РѕС‚Р°РµС‚ С‚РѕР»СЊРєРѕ С‡РµСЂРµР· YouTube), СЌС‚РѕС‚ С€Р°Рі
-REM РјРѕР¶РЅРѕ РїСЂРѕРїСѓСЃС‚РёС‚СЊ.
+REM ENCODING WARNING (keep this comment in plain ASCII, always safe to read):
+REM This file must be saved as Windows-1251 (ANSI/Cyrillic), NOT UTF-8,
+REM with CRLF line endings. cmd.exe's batch parser can corrupt multi-byte
+REM UTF-8 Cyrillic mid-line (even with "chcp 65001"), and LF-only line
+REM endings can make it misparse lines. If you edit this file, re-save it
+REM as Windows-1251 with CRLF.
+REM
+REM Одноразовая авторизация Spotify (управление воспроизведением).
+REM Нужна, только если в .env заполнена группа SPOTIFY_* — если Spotify
+REM не настроен (заказ музыки работает только через YouTube), этот шаг
+REM можно пропустить.
 
 setlocal
-chcp 65001 >nul
-title stream-companion вЂ” Р°РІС‚РѕСЂРёР·Р°С†РёСЏ Spotify
+chcp 1251 >nul
+title stream-companion — авторизация Spotify
 cd /d "%~dp0"
 
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [РћС€РёР±РєР°] Node.js РЅРµ РЅР°Р№РґРµРЅ. РЈСЃС‚Р°РЅРѕРІРё РµРіРѕ: https://nodejs.org/
+    echo [Ошибка] Node.js не найден. Установи его: https://nodejs.org/
     echo.
     pause
     exit /b 1
 )
 
 if not exist ".env" (
-    echo [РћС€РёР±РєР°] Р¤Р°Р№Р» .env РЅРµ РЅР°Р№РґРµРЅ вЂ” СЃРЅР°С‡Р°Р»Р° Р·Р°РїСѓСЃС‚Рё start.bat РѕРґРёРЅ СЂР°Р·,
-    echo Р·Р°РїРѕР»РЅРё .env Рё С‚РѕР»СЊРєРѕ РїРѕС‚РѕРј РІРѕР·РІСЂР°С‰Р°Р№СЃСЏ СЃСЋРґР°.
+    echo [Ошибка] Файл .env не найден — сначала запусти start.bat один раз,
+    echo заполни .env и только потом возвращайся сюда.
     echo.
     pause
     exit /b 1
 )
 
-echo РЎРµР№С‡Р°СЃ РѕС‚РєСЂРѕРµС‚СЃСЏ СЃС‚СЂР°РЅРёС†Р° Р°РІС‚РѕСЂРёР·Р°С†РёРё Spotify РІ Р±СЂР°СѓР·РµСЂРµ.
-echo Р Р°Р·СЂРµС€Рё РґРѕСЃС‚СѓРї вЂ” РѕРєРЅРѕ Р·Р°РєСЂРѕРµС‚СЃСЏ СЃР°РјРѕ, Р° Р·РґРµСЃСЊ РїРѕСЏРІРёС‚СЃСЏ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ.
+echo Сейчас откроется страница авторизации Spotify в браузере.
+echo Разреши доступ — окно закроется само, а здесь появится подтверждение.
 echo.
 call npm run auth:spotify
 

@@ -2,17 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   spawnPlaybackProcess,
-  buildYtdlRawOptionsArg,
-  buildScriptOptsArg,
+  spawnYtdlpMpvPipeline,
+  buildYtdlpAudioArgs,
   buildVolumeArg,
   buildAudioDeviceArg,
-  mpvEscapeListValue,
+  buildMpvStdinArgs,
   playYoutubeUrl,
 } from '../src/music/youtubePlayer.ts';
 
-// Вместо реального mpv используем сам node с коротким скриптом — это
+// Вместо реального mpv/yt-dlp используем сам node с коротким скриптом — это
 // позволяет протестировать логику обёртки (успех/ошибка/stop) без
-// зависимости от установленного mpv.
+// зависимости от установленных mpv/yt-dlp.
 
 test('finished резолвится, когда процесс завершился с кодом 0', async () => {
   const session = spawnPlaybackProcess(process.execPath, ['-e', 'process.exit(0)']);
@@ -38,80 +38,59 @@ test('finished при ошибке прикладывает вывод проц�
   await assert.rejects(() => session.finished, /завершился с кодом 2[\s\S]*не удалось разобрать ссылку/);
 });
 
-test('mpvEscapeListValue оборачивает значение в %длина%значение (защита от ":" и "," внутри)', () => {
-  // "youtube:player_client=tv" — 24 символа/байта в ASCII
-  assert.equal(mpvEscapeListValue('youtube:player_client=tv'), '%24%youtube:player_client=tv');
+test('buildYtdlpAudioArgs: без опций — только формат/вывод в stdout и сама ссылка', () => {
+  assert.deepEqual(buildYtdlpAudioArgs('https://youtu.be/xyz', {}), [
+    '-f',
+    'bestaudio',
+    '--no-playlist',
+    '-o',
+    '-',
+    'https://youtu.be/xyz',
+  ]);
 });
 
-test('mpvEscapeListValue считает длину в байтах, а не в символах (юникод)', () => {
-  const value = 'привет'; // кириллица — 2 байта на символ в UTF-8
-  const escaped = mpvEscapeListValue(value);
-  assert.equal(escaped, `%${Buffer.byteLength(value, 'utf8')}%${value}`);
+test('buildYtdlpAudioArgs: playerClient добавляет --extractor-args', () => {
+  const args = buildYtdlpAudioArgs('https://youtu.be/xyz', { playerClient: 'tv,web_safari,web_embedded' });
+  assert.ok(args.includes('--extractor-args'));
+  assert.equal(args[args.indexOf('--extractor-args') + 1], 'youtube:player_client=tv,web_safari,web_embedded');
 });
 
-test('buildYtdlRawOptionsArg: без опций — пустой массив (никаких --ytdl-raw-options)', () => {
-  assert.deepEqual(buildYtdlRawOptionsArg({}), []);
+test('buildYtdlpAudioArgs: cookiesFromBrowser добавляет --cookies-from-browser', () => {
+  const args = buildYtdlpAudioArgs('https://youtu.be/xyz', { cookiesFromBrowser: 'firefox' });
+  assert.ok(args.includes('--cookies-from-browser'));
+  assert.equal(args[args.indexOf('--cookies-from-browser') + 1], 'firefox');
+  assert.ok(!args.includes('--cookies'));
 });
 
-test('buildYtdlRawOptionsArg: только playerClient', () => {
-  const [arg] = buildYtdlRawOptionsArg({ playerClient: 'tv' });
-  assert.equal(arg, `--ytdl-raw-options=extractor-args=${mpvEscapeListValue('youtube:player_client=tv')}`);
+test('buildYtdlpAudioArgs: cookiesFile используется, только если cookiesFromBrowser не задан', () => {
+  const withBoth = buildYtdlpAudioArgs('https://youtu.be/xyz', {
+    cookiesFromBrowser: 'firefox',
+    cookiesFile: 'C:\\cookies.txt',
+  });
+  assert.ok(withBoth.includes('--cookies-from-browser') && !withBoth.includes('--cookies'));
+
+  const onlyFile = buildYtdlpAudioArgs('https://youtu.be/xyz', { cookiesFile: 'C:\\Users\\me\\cookies.txt' });
+  assert.ok(onlyFile.includes('--cookies'));
+  assert.equal(onlyFile[onlyFile.indexOf('--cookies') + 1], 'C:\\Users\\me\\cookies.txt');
 });
 
-test('buildYtdlRawOptionsArg: playerClient + cookiesFromBrowser объединяются через запятую', () => {
-  const [arg] = buildYtdlRawOptionsArg({ playerClient: 'tv', cookiesFromBrowser: 'firefox' });
-  assert.equal(
-    arg,
-    `--ytdl-raw-options=extractor-args=${mpvEscapeListValue('youtube:player_client=tv')},cookies-from-browser=${mpvEscapeListValue('firefox')}`,
-  );
+test('buildYtdlpAudioArgs: forceIpv4 добавляет "--force-ipv4"', () => {
+  const args = buildYtdlpAudioArgs('https://youtu.be/xyz', { forceIpv4: true });
+  assert.ok(args.includes('--force-ipv4'));
 });
 
-test('buildYtdlRawOptionsArg: cookiesFile используется, только если cookiesFromBrowser не задан', () => {
-  const withBoth = buildYtdlRawOptionsArg({ cookiesFromBrowser: 'firefox', cookiesFile: '/tmp/cookies.txt' });
-  assert.ok(withBoth[0]?.includes('cookies-from-browser=') && !withBoth[0]?.includes('cookies='));
-
-  const [onlyFile] = buildYtdlRawOptionsArg({ cookiesFile: 'C:\\Users\\me\\cookies.txt' });
-  assert.equal(onlyFile, `--ytdl-raw-options=cookies=${mpvEscapeListValue('C:\\Users\\me\\cookies.txt')}`);
+test('buildYtdlpAudioArgs: forceIpv4=false ничего не добавляет', () => {
+  const args = buildYtdlpAudioArgs('https://youtu.be/xyz', { forceIpv4: false });
+  assert.ok(!args.includes('--force-ipv4'));
 });
 
-test('buildYtdlRawOptionsArg: playerClient со списком через запятую (например "default,web_embedded") экранируется одним куском', () => {
-  const [arg] = buildYtdlRawOptionsArg({ playerClient: 'default,web_embedded' });
-  // Запятая внутри player_client не должна ломать верхнеуровневый разбор
-  // --ytdl-raw-options (который сам разделяет пары через запятую) — вся
-  // строка "youtube:player_client=default,web_embedded" экранируется целиком.
-  assert.equal(
-    arg,
-    `--ytdl-raw-options=extractor-args=${mpvEscapeListValue('youtube:player_client=default,web_embedded')}`,
-  );
-  // И, как следствие, там ровно один пары "extractor-args=" — запятая внутри
-  // значения не порождает вторую "пару" верхнего уровня.
-  assert.equal(arg.split('extractor-args=').length - 1, 1);
-});
-
-test('buildYtdlRawOptionsArg: forceIpv4 добавляет "force-ipv4=" без значения', () => {
-  const [arg] = buildYtdlRawOptionsArg({ forceIpv4: true });
-  assert.equal(arg, '--ytdl-raw-options=force-ipv4=');
-});
-
-test('buildYtdlRawOptionsArg: forceIpv4=false ничего не добавляет', () => {
-  assert.deepEqual(buildYtdlRawOptionsArg({ forceIpv4: false }), []);
-});
-
-test('buildYtdlRawOptionsArg: playerClient + forceIpv4 вместе', () => {
-  const [arg] = buildYtdlRawOptionsArg({ playerClient: 'tv', forceIpv4: true });
-  assert.equal(
-    arg,
-    `--ytdl-raw-options=extractor-args=${mpvEscapeListValue('youtube:player_client=tv')},force-ipv4=`,
-  );
-});
-
-test('buildScriptOptsArg: без ytdlPath — пустой массив', () => {
-  assert.deepEqual(buildScriptOptsArg({}), []);
-});
-
-test('buildScriptOptsArg: с ytdlPath собирает --script-opts с экранированным путём (в т.ч. Windows-путь с ":")', () => {
-  const [arg] = buildScriptOptsArg({ ytdlPath: 'C:\\tools\\yt-dlp.exe' });
-  assert.equal(arg, `--script-opts=ytdl_hook-ytdl_path=${mpvEscapeListValue('C:\\tools\\yt-dlp.exe')}`);
+test('buildYtdlpAudioArgs: ссылка на видео — всегда последний аргумент', () => {
+  const args = buildYtdlpAudioArgs('https://youtu.be/xyz', {
+    playerClient: 'tv',
+    cookiesFromBrowser: 'firefox',
+    forceIpv4: true,
+  });
+  assert.equal(args.at(-1), 'https://youtu.be/xyz');
 });
 
 test('buildVolumeArg: без volume — пустой массив (используется дефолтная громкость mpv)', () => {
@@ -126,10 +105,6 @@ test('buildVolumeArg: volume=0 (не путать с "не задано") тож
   assert.deepEqual(buildVolumeArg({ volume: 0 }), ['--volume=0']);
 });
 
-test('buildYtdlRawOptionsArg не задействует volume — это отдельный, не yt-dlp-специфичный флаг', () => {
-  assert.deepEqual(buildYtdlRawOptionsArg({ volume: 50 }), []);
-});
-
 test('buildAudioDeviceArg: без audioDevice — пустой массив (устройство по умолчанию)', () => {
   assert.deepEqual(buildAudioDeviceArg({}), []);
 });
@@ -138,15 +113,59 @@ test('buildAudioDeviceArg: с audioDevice — "--audio-device=<значение>
   assert.deepEqual(buildAudioDeviceArg({ audioDevice: 'wasapi/{abc-123}' }), ['--audio-device=wasapi/{abc-123}']);
 });
 
-test('buildYtdlRawOptionsArg не задействует audioDevice — это отдельный, не yt-dlp-специфичный флаг', () => {
-  assert.deepEqual(buildYtdlRawOptionsArg({ audioDevice: 'wasapi/{abc-123}' }), []);
+test('buildMpvStdinArgs: без опций — только --no-video и "-" (чтение из stdin)', () => {
+  assert.deepEqual(buildMpvStdinArgs({}), ['--no-video', '-']);
 });
 
-test('playYoutubeUrl без опций не добавляет --ytdl-raw-options', () => {
-  // buildYtdlRawOptionsArg уже покрыт отдельными тестами выше — здесь только
-  // убеждаемся, что playYoutubeUrl реально им пользуется (через stop() сразу
-  // после запуска, не дожидаясь реального mpv — он вряд ли установлен в CI).
-  const session = playYoutubeUrl('https://youtu.be/dQw4w9WgXcQ', process.execPath);
+test('buildMpvStdinArgs: volume/audioDevice добавляются перед --no-video/"-"', () => {
+  assert.deepEqual(buildMpvStdinArgs({ volume: 25, audioDevice: 'wasapi/{abc}' }), [
+    '--volume=25',
+    '--audio-device=wasapi/{abc}',
+    '--no-video',
+    '-',
+  ]);
+});
+
+test('playYoutubeUrl: stop() останавливает и yt-dlp, и mpv, finished резолвится без ошибки', async () => {
+  const session = playYoutubeUrl('https://youtu.be/xyz', process.execPath, {
+    ytdlPath: process.execPath,
+  });
   session.stop();
-  return session.finished; // не должно бросить — процесс остановлен нами, а не упал сам
+  await session.finished; // не должно бросить, несмотря на то что оба процесса убиты
+});
+
+test('spawnYtdlpMpvPipeline: finished резолвится, когда yt-dlp и mpv оба завершились успешно', async () => {
+  // "yt-dlp" — пишет немного байт в stdout и завершается с кодом 0.
+  const ytdlpArgs = ['-e', 'process.stdout.write("fake audio bytes"); process.exit(0)'];
+  // "mpv" — читает stdin до EOF и только тогда завершается с кодом 0
+  // (так проверяем, что stdout yt-dlp реально прокинут в stdin mpv).
+  const mpvArgs = ['-e', 'process.stdin.on("data", () => {}); process.stdin.on("end", () => process.exit(0));'];
+
+  const session = spawnYtdlpMpvPipeline(process.execPath, ytdlpArgs, process.execPath, mpvArgs);
+  await session.finished; // не должно бросить
+});
+
+test('spawnYtdlpMpvPipeline: если yt-dlp не смог скачать аудио — finished отклоняется с его выводом', async () => {
+  const ytdlpArgs = ['-e', 'process.stderr.write("ERROR: Sign in to confirm you are not a bot"); process.exit(1)'];
+  const mpvArgs = ['-e', 'process.stdin.on("data", () => {}); process.stdin.on("end", () => process.exit(0));'];
+
+  const session = spawnYtdlpMpvPipeline(process.execPath, ytdlpArgs, process.execPath, mpvArgs);
+  await assert.rejects(() => session.finished, /не смог скачать аудио[\s\S]*Sign in to confirm/);
+});
+
+test('spawnYtdlpMpvPipeline: если mpv упал с ошибкой (yt-dlp успешен) — finished отклоняется с выводом mpv', async () => {
+  const ytdlpArgs = ['-e', 'process.stdout.write("fake audio bytes"); process.exit(0)'];
+  const mpvArgs = ['-e', 'process.stderr.write("mpv: не смог проиграть"); process.exit(2)'];
+
+  const session = spawnYtdlpMpvPipeline(process.execPath, ytdlpArgs, process.execPath, mpvArgs);
+  await assert.rejects(() => session.finished, /завершился с кодом 2[\s\S]*не смог проиграть/);
+});
+
+test('spawnYtdlpMpvPipeline: stop() останавливает оба процесса, finished резолвится без ошибки', async () => {
+  const ytdlpArgs = ['-e', 'setTimeout(() => {}, 60000)'];
+  const mpvArgs = ['-e', 'setTimeout(() => {}, 60000)'];
+
+  const session = spawnYtdlpMpvPipeline(process.execPath, ytdlpArgs, process.execPath, mpvArgs);
+  session.stop();
+  await session.finished;
 });

@@ -308,6 +308,21 @@ test('Spotify не настроен — ссылка на Spotify отклоня
   }
 });
 
+test('YouTube не настроен — ссылка на YouTube отклоняется, подсказка не упоминает YouTube', async () => {
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    const noYoutubeCfg: RequestHandlerConfig = { ...baseCfg, youtubeApiKey: undefined };
+    const fetchImpl = fakeFetchFactory({ followedDaysAgo: 10, youtube: { durationIso: 'PT3M' } });
+    await handleChatMessage(makeMsg({ text: '!sr https://youtu.be/dQw4w9WgXcQ' }), noYoutubeCfg, fetchImpl);
+    await handleChatMessage(makeMsg({ text: '!sr' }), noYoutubeCfg, fetchImpl);
+    assert.match(replies[0], /YouTube.*недоступен/s);
+    assert.doesNotMatch(replies[1], /YouTube/);
+    assert.equal(peekNextPending(), undefined);
+  } finally {
+    unsubscribe();
+  }
+});
+
 test('Spotify не настроен — YouTube-заказы всё равно работают', async () => {
   const { replies, unsubscribe } = collectReplies();
   try {

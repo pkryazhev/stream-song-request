@@ -61,15 +61,14 @@ export function spawnPlaybackProcess(command: string, args: string[]): PlaybackS
  *
  * На Windows — нет: Node.js там лишь эмулирует POSIX-сигналы, а
  * child.kill() под капотом сводится к TerminateProcess только для САМОГО
- * процесса mpv, но не для его дочерних процессов (mpv через ytdl_hook сам
- * запускает yt-dlp как подпроцесс, чтобы разобрать ссылку и получить прямой
- * URL потока). На практике это плохо ловится тестами (нужна реальная
- * Windows-машина), но именно это — известная и частая причина, почему
- * "скип" визуально срабатывает (следующий трек в очереди стартует), а
- * прошлый процесс mpv из-за этого не завершается и продолжает играть
- * параллельно с новым (два трека одновременно). taskkill с /T (дерево
- * процессов, то есть и сам процесс, и все его потомки) и /F (принудительно)
- * останавливает его гарантированно.
+ * процесса (но не для его дочерних процессов, если они у него есть). На
+ * практике это плохо ловится тестами (нужна реальная Windows-машина), но
+ * именно это — известная и частая причина, почему "скип" визуально
+ * срабатывает (следующий трек в очереди стартует), а прошлый процесс
+ * из-за этого не завершается и продолжает играть параллельно с новым (два
+ * трека одновременно). taskkill с /T (дерево процессов, то есть и сам
+ * процесс, и все его потомки) и /F (принудительно) останавливает его
+ * гарантированно.
  */
 function killProcess(child: ReturnType<typeof spawn>): void {
   if (process.platform === 'win32' && child.pid) {
@@ -89,7 +88,7 @@ export interface YoutubePlaybackOptions {
    * "tv" или "android_vr". YouTube в 2025 постепенно требует т.н. PO Token
    * почти для всех клиентов, кроме нескольких — запрос от их имени сейчас
    * работает и без токена/кук ("Sign in to confirm you're not a bot").
-   * Пусто/undefined — extractor-args не передаётся вообще.
+   * Пусто/undefined — --extractor-args не передаётся вообще.
    */
   playerClient?: string;
   /** Имя браузера для --cookies-from-browser (firefox/chrome/edge/...). */
@@ -97,23 +96,24 @@ export interface YoutubePlaybackOptions {
   /** Путь к cookies.txt в формате Netscape — альтернатива cookiesFromBrowser. */
   cookiesFile?: string;
   /**
-   * Явный путь к исполняемому файлу yt-dlp, который должен использовать
-   * mpv (--script-opts=ytdl_hook-ytdl_path=...), вместо того, что первым
-   * найдётся в PATH. Полезно, если на машине несколько установок yt-dlp
-   * (например, winget поставил один, а рядом вручную положен более свежий
-   * .exe) — mpv может резолвить не тот, который реально обновлялся.
+   * Явный путь к исполняемому файлу yt-dlp, который мы сами запускаем для
+   * скачивания аудио (см. playYoutubeUrl). Полезно, если на машине несколько
+   * установок yt-dlp (например, winget поставил один, а рядом вручную
+   * положен более свежий .exe) — без этой опции используется первый yt-dlp,
+   * который найдётся в PATH, а это не всегда тот, который реально обновлялся.
    */
   ytdlPath?: string;
   /**
-   * Заставляет yt-dlp резолвить видео только по IPv4 (yt-dlp --force-ipv4).
-   * Помогает с "HTTP error 403 Forbidden" при собственно проигрывании (уже
-   * после успешного разбора ссылки) на dual-stack (IPv4+IPv6) сетях: ссылка
-   * на googlevideo.com привязывается к IP, с которого её запросил yt-dlp —
-   * если сам mpv потом обращается к ней с другого IP (например, IPv6, пока
-   * yt-dlp использовал IPv4, или наоборот), YouTube отвечает 403. Помогает
-   * не всегда (у mpv нет отдельного способа принудительно указать IP-семью
-   * для собственного запроса) — если не помогло, следующий шаг уже на
-   * уровне ОС (см. .env.example).
+   * Заставляет yt-dlp резолвить и скачивать видео только по IPv4
+   * (yt-dlp --force-ipv4). Раньше (когда прямую ссылку на googlevideo.com
+   * получал yt-dlp, а скачивал её сам mpv отдельным HTTP-запросом) это было
+   * попыткой обойти "HTTP error 403 Forbidden" из-за IP-привязки ссылки —
+   * ссылка привязывается к IP, с которого её запросил yt-dlp, и если сам
+   * mpv стучится с другого IP (типично на dual-stack сетях), YouTube отвечал
+   * 403. Теперь skачивание тоже делает yt-dlp (см. playYoutubeUrl) — тот же
+   * процесс, тот же IP что для резолва, что для скачивания, так что эта
+   * проблема больше не актуальна сама по себе, но флаг всё равно оставлен —
+   * иногда IPv4 просто стабильнее IPv6 на конкретной сети.
    */
   forceIpv4?: boolean;
   /**
@@ -138,69 +138,64 @@ export interface YoutubePlaybackOptions {
 }
 
 /**
- * mpv-совместимое экранирование значения для list-опций (--ytdl-raw-options
- * и т.п.): значение оборачивается в %<длина в байтах>%<значение>. Без этого
- * любой ":" или "," внутри значения (например, "youtube:player_client=tv"
- * или путь на Windows "C:\Users\...\cookies.txt") ломает разбор опции у mpv
- * (см. https://github.com/mpv-player/mpv/issues/8021) — экранируем всегда,
- * чтобы не зависеть от того, какие символы окажутся в конкретном значении.
+ * Собирает аргументы командной строки yt-dlp для скачивания только аудио
+ * заданного видео и вывода его сырых байт в stdout (playYoutubeUrl пускает
+ * этот stdout прямо во stdin mpv, см. там подробное объяснение зачем).
+ * Экспортировано отдельно ради юнит-тестов.
  */
-export function mpvEscapeListValue(value: string): string {
-  const byteLength = Buffer.byteLength(value, 'utf8');
-  return `%${byteLength}%${value}`;
-}
-
-/** Экспортировано отдельно ради юнит-тестов — сборку строки проще проверить напрямую, без реального mpv. */
-export function buildYtdlRawOptionsArg(options: YoutubePlaybackOptions): string[] {
-  const pairs: string[] = [];
+export function buildYtdlpAudioArgs(videoUrl: string, options: YoutubePlaybackOptions): string[] {
+  const args: string[] = ['-f', 'bestaudio', '--no-playlist', '-o', '-'];
   if (options.playerClient) {
-    pairs.push(`extractor-args=${mpvEscapeListValue(`youtube:player_client=${options.playerClient}`)}`);
+    args.push('--extractor-args', `youtube:player_client=${options.playerClient}`);
   }
   if (options.cookiesFromBrowser) {
-    pairs.push(`cookies-from-browser=${mpvEscapeListValue(options.cookiesFromBrowser)}`);
+    args.push('--cookies-from-browser', options.cookiesFromBrowser);
   } else if (options.cookiesFile) {
-    pairs.push(`cookies=${mpvEscapeListValue(options.cookiesFile)}`);
+    args.push('--cookies', options.cookiesFile);
   }
   if (options.forceIpv4) {
-    // Флаг без значения — yt-dlp принимает --force-ipv4 как булев флаг, в
-    // mpv-шном list-синтаксисе это "ключ=" с пустым значением.
-    pairs.push('force-ipv4=');
+    args.push('--force-ipv4');
   }
-  return pairs.length ? [`--ytdl-raw-options=${pairs.join(',')}`] : [];
+  args.push(videoUrl);
+  return args;
 }
 
-/** Экспортировано отдельно ради юнит-тестов, как и buildYtdlRawOptionsArg. */
-export function buildScriptOptsArg(options: YoutubePlaybackOptions): string[] {
-  if (!options.ytdlPath) return [];
-  return [`--script-opts=ytdl_hook-ytdl_path=${mpvEscapeListValue(options.ytdlPath)}`];
-}
-
-/** Экспортировано отдельно ради юнит-тестов, как и buildYtdlRawOptionsArg. */
+/** Экспортировано отдельно ради юнит-тестов, как и buildYtdlpAudioArgs. */
 export function buildVolumeArg(options: YoutubePlaybackOptions): string[] {
   return options.volume === undefined ? [] : [`--volume=${options.volume}`];
 }
 
-/**
- * Экспортировано отдельно ради юнит-тестов, как и buildYtdlRawOptionsArg.
- * В отличие от --ytdl-raw-options, --audio-device — обычный (не list-)
- * флаг mpv, поэтому mpvEscapeListValue тут не нужен.
- */
+/** Экспортировано отдельно ради юнит-тестов, как и buildYtdlpAudioArgs. */
 export function buildAudioDeviceArg(options: YoutubePlaybackOptions): string[] {
   return options.audioDevice ? [`--audio-device=${options.audioDevice}`] : [];
 }
 
 /**
- * Воспроизводит YouTube-видео локально через mpv (у mpv есть встроенная
- * поддержка YouTube-ссылок через yt-dlp/youtube-dl — отдельно скачивать
- * файл не нужно, но yt-dlp должен быть установлен и виден mpv).
- * Используется только для заказов с YouTube — Spotify-треки играют через
- * Spotify Connect, см. spotifyProvider.ts.
+ * Собирает аргументы командной строки mpv для проигрывания аудио, которое
+ * приходит через stdin (см. playYoutubeUrl) — "-" в качестве имени файла
+ * означает для mpv именно stdin. Экспортировано отдельно ради юнит-тестов.
+ */
+export function buildMpvStdinArgs(options: YoutubePlaybackOptions): string[] {
+  return [...buildVolumeArg(options), ...buildAudioDeviceArg(options), '--no-video', '-'];
+}
+
+/**
+ * Воспроизводит YouTube-видео локально: yt-dlp сам скачивает аудио и
+ * стримит его сырые байты напрямую в stdin mpv, который просто их
+ * проигрывает — mpv никогда не делает собственный сетевой запрос к
+ * googlevideo.com.
  *
- * Флаг --really-quiet намеренно не используется: он подавляет и вывод
- * ошибок mpv, из-за чего при сбое (например, устаревший yt-dlp не смог
- * разобрать страницу YouTube) не было видно причины — только "код 2" без
- * подробностей. Сам вывод mpv никуда не печатается (см. spawnPlaybackProcess) —
- * он просто перехватывается и попадает в лог только при ошибке.
+ * Так было не всегда — раньше mpv (через встроенный ytdl_hook) сам
+ * резолвил и мгновенно "не мытьём, так катаньем" уже сам, а не yt-dlp
+ * докачивал итоговую ссылку на googlevideo.com. Оказалось, что YouTube
+ * сейчас (2026) в некоторых случаях блокирует именно сетевой запрос
+ * ffmpeg/mpv к этой ссылке (HTTP 403), даже когда та же самая ссылка
+ * секунду назад успешно скачивалась через сам yt-dlp (или даже banal curl) —
+ * то есть ссылка валидна, но именно клиент mpv/ffmpeg под подозрением у
+ * анти-бот защиты YouTube. Никакие --extractor-args/куки/IPv4 этого не
+ * лечат, потому что все они влияют только на то, как РЕЗОЛВИТСЯ ссылка, а
+ * не на то, кто её СКАЧИВАЕТ. Раз yt-dlp скачивать умеет надёжно (в
+ * отличие от mpv) — пусть он и скачивает, а mpv остаётся только плеером.
  *
  * options управляет обходом YouTube-проверки "Sign in to confirm you're
  * not a bot" (и связанных ошибок вроде "The page needs to be reloaded") —
@@ -208,13 +203,100 @@ export function buildAudioDeviceArg(options: YoutubePlaybackOptions): string[] {
  * YOUTUBE_COOKIES_FILE / YTDLP_PATH в .env.example.
  */
 export function playYoutubeUrl(videoUrl: string, mpvPath = 'mpv', options: YoutubePlaybackOptions = {}): PlaybackSession {
-  const args = [
-    ...buildScriptOptsArg(options),
-    ...buildYtdlRawOptionsArg(options),
-    ...buildVolumeArg(options),
-    ...buildAudioDeviceArg(options),
-    '--no-video',
-    videoUrl,
-  ];
-  return spawnPlaybackProcess(mpvPath, args);
+  const ytdlpPath = options.ytdlPath || 'yt-dlp';
+  return spawnYtdlpMpvPipeline(ytdlpPath, buildYtdlpAudioArgs(videoUrl, options), mpvPath, buildMpvStdinArgs(options));
+}
+
+/**
+ * Соединяет процесс yt-dlp (скачивает аудио, пишет сырые байты в stdout) с
+ * процессом mpv (читает их из stdin и проигрывает) — см. playYoutubeUrl,
+ * где объясняется, почему именно так. Вынесено отдельно от playYoutubeUrl
+ * ради юнит-тестов: сюда можно подставить node с простыми скриптами вместо
+ * реальных yt-dlp/mpv, не трогая сборку аргументов командной строки.
+ */
+export function spawnYtdlpMpvPipeline(
+  ytdlpPath: string,
+  ytdlpArgs: string[],
+  mpvPath: string,
+  mpvArgs: string[],
+): PlaybackSession {
+  const ytdlp = spawn(ytdlpPath, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const mpv = spawn(mpvPath, mpvArgs, { stdio: [ytdlp.stdout, 'pipe', 'pipe'] });
+
+  let stopped = false;
+  let ytdlpStderr = '';
+  let mpvOutput = '';
+
+  const capture = (target: 'ytdlp' | 'mpv') =>
+    (chunk: Buffer): void => {
+      if (target === 'ytdlp') {
+        ytdlpStderr += chunk.toString('utf8');
+        if (ytdlpStderr.length > MAX_CAPTURED_OUTPUT) {
+          ytdlpStderr = ytdlpStderr.slice(ytdlpStderr.length - MAX_CAPTURED_OUTPUT);
+        }
+      } else {
+        mpvOutput += chunk.toString('utf8');
+        if (mpvOutput.length > MAX_CAPTURED_OUTPUT) {
+          mpvOutput = mpvOutput.slice(mpvOutput.length - MAX_CAPTURED_OUTPUT);
+        }
+      }
+    };
+  ytdlp.stderr?.on('data', capture('ytdlp'));
+  mpv.stdout?.on('data', capture('mpv'));
+  mpv.stderr?.on('data', capture('mpv'));
+
+  // yt-dlp может либо не найти видео/упереться в бан (см. буллеты про
+  // "Sign in to confirm..." в README), либо честно докачать всё до конца —
+  // в обоих случаях он завершается сам, до того как закончит играть mpv
+  // (mpv просто получит EOF на stdin, когда yt-dlp закроет stdout). Только
+  // ошибка самого yt-dlp (ненулевой код) означает реальный сбой — если он
+  // вышел с 0, это значит "аудио полностью докачано", а не "воспроизведение
+  // не удалось".
+  let ytdlpFailed = false;
+  const ytdlpDone = new Promise<void>((resolve) => {
+    ytdlp.on('exit', (code) => {
+      if (!stopped && code !== 0 && code !== null) {
+        ytdlpFailed = true;
+      }
+      resolve();
+    });
+    ytdlp.on('error', () => {
+      ytdlpFailed = true;
+      resolve();
+    });
+  });
+
+  const finished = new Promise<void>((resolve, reject) => {
+    mpv.on('exit', (code) => {
+      void ytdlpDone.then(() => {
+        if (stopped) {
+          resolve();
+          return;
+        }
+        if (ytdlpFailed) {
+          const details = ytdlpStderr.trim();
+          const suffix = details ? `\n--- вывод "${ytdlpPath}" ---\n${details}` : ' (без вывода в stdout/stderr)';
+          reject(new Error(`Процесс "${ytdlpPath}" не смог скачать аудио${suffix}`));
+          return;
+        }
+        if (code === 0 || code === null) {
+          resolve();
+          return;
+        }
+        const details = mpvOutput.trim();
+        const suffix = details ? `\n--- вывод "${mpvPath}" ---\n${details}` : ' (без вывода в stdout/stderr)';
+        reject(new Error(`Процесс плеера "${mpvPath}" завершился с кодом ${code}${suffix}`));
+      });
+    });
+    mpv.on('error', (err) => reject(err));
+  });
+
+  return {
+    finished,
+    stop: () => {
+      stopped = true;
+      killProcess(mpv);
+      killProcess(ytdlp);
+    },
+  };
 }

@@ -6,13 +6,18 @@ import { TwitchChatClient } from './integrations/twitch/chatClient.ts';
 import { createTwitchUserTokenStore } from './integrations/twitch/twitchUserAuth.ts';
 import { createSpotifyUserTokenStore } from './music/spotifyAuth.ts';
 import { SpotifyPlaybackController } from './music/spotifyProvider.ts';
-import { registerMusicRequestHandler } from './music/requestHandler.ts';
+import { registerMusicRequestHandler, type RequestHandlerConfig } from './music/requestHandler.ts';
+import { startPointsRequestMode, disablePointsReward, type PointsModeHandle } from './music/pointsMode.ts';
 import { registerSkipVoteHandler } from './music/skipVoteHandler.ts';
 import { registerCurrentTrackHandler } from './music/currentTrackHandler.ts';
 import { registerRequestsToggleHandler } from './music/requestsToggleHandler.ts';
 import { setRequestsPaused } from './music/requestsGate.ts';
-import { PlaybackOrchestrator, type SpotifyPlaybackLike } from './music/playbackOrchestrator.ts';
+import { PlaybackOrchestrator, type DefaultPlaylistLoader } from './music/playbackOrchestrator.ts';
 import { playYoutubeUrl } from './music/youtubePlayer.ts';
+import { playYandexTrack } from './music/yandexPlayer.ts';
+import { parseYandexPlayUri, resolveYandexPlayback } from './music/yandexMusicProvider.ts';
+import { fetchYandexPlaylistTracks } from './music/yandexPlaylist.ts';
+import { peekNextDefaultTrack, removeDefaultTrack, replaceDefaultTracks } from './db/defaultTracks.ts';
 
 // Подстраховка: необработанный reject где-то в цепочке промисов не должен
 // ронять всё приложение посреди стрима — логируем и продолжаем работать.
@@ -57,7 +62,7 @@ chatClient.connect().catch((err: unknown) => {
   logger.error('app', 'Не удалось подключиться к чату Twitch (нужна авторизация — npm run auth:twitch)', err);
 });
 
-registerMusicRequestHandler({
+const requestCfg: RequestHandlerConfig = {
   commandName: config.chat.commandName,
   minFollowerDays: config.chat.minFollowerDays,
   maxYoutubeDurationSec: config.youtube.maxDurationSec,
@@ -66,12 +71,65 @@ registerMusicRequestHandler({
   // необязательны (см. config.ts) — если Spotify не настроен, заказы
   // принимаются только по YouTube-ссылкам.
   spotify: config.spotify ? { clientId: config.spotify.clientId, clientSecret: config.spotify.clientSecret } : undefined,
+  yandex: config.yandexMusic ?? undefined,
   twitchClientId: config.twitch.clientId,
   twitchBroadcasterId: config.chat.broadcasterId,
   getTwitchAccessToken: () => twitchUserTokens.getValidAccessToken(),
+};
+
+const isPointsMode = config.points.requestMode === 'points';
+// В режиме баллов команда заказа остаётся, но только подсказывает награду.
+registerMusicRequestHandler({
+  ...requestCfg,
+  getPointsRewardTitle: isPointsMode ? () => pointsMode?.getRewardTitle() ?? config.points.rewardTitle : undefined,
 });
 
-let spotifyController: SpotifyPlaybackLike | null = null;
+// --- Заказ музыки за баллы канала ---
+const broadcasterTokens = createTwitchUserTokenStore({
+  clientId: config.twitch.clientId,
+  clientSecret: config.twitch.clientSecret,
+  tokenFilePath: config.points.tokenFilePath,
+});
+const hasBroadcasterToken = broadcasterTokens.load();
+const channelPointsApi = {
+  clientId: config.twitch.clientId,
+  broadcasterId: config.chat.broadcasterId,
+  getAccessToken: () => broadcasterTokens.getValidAccessToken(),
+};
+
+let pointsMode: PointsModeHandle | null = null;
+if (isPointsMode) {
+  if (!hasBroadcasterToken) {
+    logger.error(
+      'app',
+      `Режим заказа за баллы канала включён, но нет токена стримера (${config.points.tokenFilePath}). ` +
+        'Запусти "npm run auth:twitch-points" (залогинившись аккаунтом канала) и перезапусти приложение.',
+    );
+  } else {
+    startPointsRequestMode({
+      api: channelPointsApi,
+      reward: { title: config.points.rewardTitle, cost: config.points.rewardCost, prompt: config.points.rewardPrompt },
+      request: requestCfg,
+    })
+      .then((handle) => {
+        pointsMode = handle;
+      })
+      .catch((err: unknown) => {
+        logger.error('app', 'Не удалось включить заказ музыки за баллы канала', err);
+      });
+  }
+} else if (hasBroadcasterToken) {
+  // Награда могла остаться включённой с прошлого запуска в режиме баллов.
+  disablePointsReward(channelPointsApi, config.points.rewardTitle)
+    .then((disabledTitle) => {
+      if (disabledTitle) logger.info('app', `Награда "${disabledTitle}" выключена — сейчас заказ командой`);
+    })
+    .catch((err: unknown) => {
+      logger.error('app', 'Не удалось выключить награду за баллы канала (режим заказа командой)', err);
+    });
+}
+
+let spotifyController: SpotifyPlaybackController | null = null;
 if (config.spotify) {
   const spotifyUserTokens = createSpotifyUserTokenStore({
     clientId: config.spotify.clientId,
@@ -90,8 +148,26 @@ if (config.spotify) {
 const orchestrator = new PlaybackOrchestrator(
   spotifyController,
   {
-    play: (url) =>
-      playYoutubeUrl(url, config.mpvPath, {
+    // Всё, что не Spotify, играет mpv: заказы Яндекс Музыки хранятся в
+    // очереди как yandex:track:<id>, остальное — ссылки на YouTube.
+    play: (url) => {
+      const yandexTrackId = parseYandexPlayUri(url);
+      if (yandexTrackId !== null) {
+        const token = config.yandexMusic?.token;
+        if (!token) {
+          // Заказ попал в очередь, пока токен был, а потом его убрали из .env.
+          return {
+            finished: Promise.reject(new Error('Заказ из Яндекс Музыки, но YANDEX_MUSIC_TOKEN не задан')),
+            stop: () => {},
+          };
+        }
+        const targetLufs = config.yandexMusic?.loudnessTargetLufs ?? null;
+        return playYandexTrack(() => resolveYandexPlayback(yandexTrackId, token, targetLufs), config.mpvPath, {
+          volume: config.youtube.volume,
+          audioDevice: config.youtube.audioDevice,
+        });
+      }
+      return playYoutubeUrl(url, config.mpvPath, {
         playerClient: config.youtube.playerClient,
         cookiesFromBrowser: config.youtube.cookiesFromBrowser,
         cookiesFile: config.youtube.cookiesFile,
@@ -99,16 +175,45 @@ const orchestrator = new PlaybackOrchestrator(
         forceIpv4: config.youtube.forceIpv4,
         volume: config.youtube.volume,
         audioDevice: config.youtube.audioDevice,
-      }),
+      });
+    },
   },
   { peekNextPending, markPlaying, markDone },
+  { peekNext: peekNextDefaultTrack, remove: removeDefaultTrack, replaceAll: replaceDefaultTracks },
+  createDefaultPlaylistLoader(),
   {
-    defaultPlaylistUri: config.spotify?.defaultPlaylistUri ?? null,
-    endOfTrackThresholdMs: config.playback.endOfTrackThresholdMs,
     pollIntervalMs: config.playback.pollIntervalMs,
+    shuffleDefaultPlaylist: config.playback.shuffleDefaultPlaylist,
   },
 );
-orchestrator.start();
+void orchestrator.start();
+
+/**
+ * Откуда брать треки для таблицы дефолтного плейлиста. config.ts гарантирует,
+ * что задан не больше чем один плейлист: Spotify (SPOTIFY_DEFAULT_PLAYLIST_URI)
+ * или Яндекс Музыка (YANDEX_DEFAULT_PLAYLIST_URL).
+ */
+function createDefaultPlaylistLoader(): DefaultPlaylistLoader | null {
+  const yandex = config.yandexMusic;
+  if (yandex?.defaultPlaylist) {
+    const ref = yandex.defaultPlaylist.ref;
+    return () => fetchYandexPlaylistTracks(ref, yandex.token);
+  }
+  const playlistUri = config.spotify?.defaultPlaylistUri;
+  if (spotifyController && playlistUri) {
+    const controller = spotifyController;
+    return async () =>
+      (await controller.fetchPlaylistTracks(playlistUri)).map((t) => ({
+        provider: 'spotify' as const,
+        playUri: t.uri,
+        title: t.title,
+        author: t.artist,
+        durationSec: Math.round(t.durationMs / 1000),
+      }));
+  }
+  logger.warn('app', 'Дефолтный плейлист не задан — между заказами будет тишина.');
+  return null;
+}
 
 // unregister не используется — обработчик живёт всё время работы приложения.
 registerSkipVoteHandler(orchestrator, {
@@ -124,14 +229,32 @@ registerRequestsToggleHandler(orchestrator, {
   resumeCommand: config.chat.resumeRequestsCommand,
 });
 
-logger.info('app', `Обработка заказов музыки включена (команда "${config.chat.commandName}")`);
+logger.info(
+  'app',
+  isPointsMode
+    ? `Обработка заказов музыки включена (за баллы канала, награда "${config.points.rewardTitle}")`
+    : `Обработка заказов музыки включена (команда "${config.chat.commandName}")`,
+);
 
-function shutdown(): void {
+// Сколько ждать постановки награды на паузу при выходе — дольше держать
+// окно открытым после Ctrl+C не стоит, даже если Twitch не отвечает.
+const SHUTDOWN_REWARD_PAUSE_TIMEOUT_MS = 3000;
+
+let shuttingDown = false;
+async function shutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
   logger.info('app', 'Останавливаюсь...');
   orchestrator.stop();
   chatClient.disconnect();
+  if (pointsMode) {
+    const pausing = pointsMode.stop().catch((err: unknown) => {
+      logger.error('app', 'Не удалось поставить награду за баллы канала на паузу при выходе', err);
+    });
+    await Promise.race([pausing, new Promise((resolve) => setTimeout(resolve, SHUTDOWN_REWARD_PAUSE_TIMEOUT_MS))]);
+  }
   process.exit(0);
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => void shutdown());
+process.on('SIGTERM', () => void shutdown());
