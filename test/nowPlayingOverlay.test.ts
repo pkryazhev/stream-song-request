@@ -164,3 +164,42 @@ test('оверлей: /overlay — страница', async () => {
     },
   );
 });
+
+test('оверлей: пауза в Spotify — прогресс берётся у Spotify и не идёт дальше', async () => {
+  const playUri = 'spotify:track:abc';
+  let spotifyCalls = 0;
+  const server = startNowPlayingOverlay({
+    port: 0,
+    getNowPlaying: () => ({
+      kind: 'default',
+      provider: 'spotify',
+      title: 'Thunder',
+      author: 'Skott',
+      playUri,
+      durationSec: 228,
+      startedAt: Date.now() - 100_000,
+      requestedByLogin: null,
+    }),
+    spotifyApp: null,
+    getSpotifyPlayback: async () => {
+      spotifyCalls++;
+      return { isPlaying: false, progressMs: 16_000, durationMs: 228_000, trackUri: playUri, trackTitle: 'Thunder', trackArtist: 'Skott' };
+    },
+    yandexToken: undefined,
+  });
+  if (!server.listening) await once(server, 'listening');
+  try {
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const read = async () => (await (await fetch(`${base}/overlay/state`)).json()) as OverlayState;
+    await read(); // первый запрос запускает опрос Spotify
+    await new Promise((r) => setTimeout(r, 50));
+    const first = await read();
+    assert.equal(first.isPlaying, false);
+    assert.equal(first.positionSec, 16);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal((await read()).positionSec, 16, 'на паузе время стоит');
+    assert.equal(spotifyCalls, 1, 'Spotify опрашивается не чаще раза в секунду');
+  } finally {
+    server.close();
+  }
+});

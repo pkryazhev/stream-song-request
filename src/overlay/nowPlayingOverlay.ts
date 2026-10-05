@@ -13,7 +13,7 @@ import { toTrackDisplay } from './trackDisplay.ts';
  * HTTP-сервер на 127.0.0.1, отдаёт
  *
  *  - /overlay        — сама страница-плашка (overlay.html);
- *  - /overlay/state  — что играет сейчас (JSON, страница опрашивает раз в секунду);
+ *  - /overlay/state  — что играет сейчас (JSON, страница опрашивает дважды в секунду);
  *  - /overlay/cover  — обложка текущего трека.
  *
  * Обложку сервер скачивает сам и отдаёт со своего адреса: так страница может
@@ -64,7 +64,8 @@ const IDLE_STATE: OverlayState = {
 };
 
 /** Не чаще этого спрашиваем у Spotify точный прогресс трека. */
-const SPOTIFY_PROGRESS_REFRESH_MS = 5000;
+// Чаще раза в секунду смысла нет, реже — плашка замечает паузу в Spotify с опозданием.
+const SPOTIFY_PROGRESS_REFRESH_MS = 1000;
 const COVER_CACHE_SIZE = 20;
 
 /** Адрес обложки трека в интернете; null — обложки нет. */
