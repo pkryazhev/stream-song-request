@@ -542,3 +542,23 @@ test('getNowPlaying: трек дефолтного плейлиста Spotify �
     await done;
   }
 });
+
+test('getNowPlaying при переходе Spotify → Spotify через очередь: второй трек со своим startedAt (для оверлея)', async () => {
+  const spotify = new FakeSpotify();
+  const { orchestrator, done } = setup({ spotify, playlist: [def(1, 'spotify'), def(2, 'spotify')] });
+  try {
+    await until(() => orchestrator.getNowPlaying()?.playUri === 'spotify:track:d1', 'первый трек');
+    const first = orchestrator.getNowPlaying()!;
+    assert.notEqual(first.startedAt, null);
+    await until(() => spotify.calls.includes('queue spotify:track:d2'), 'второй трек в очереди Spotify');
+    await until(() => orchestrator.getNowPlaying()?.playUri === 'spotify:track:d2', 'второй трек заиграл');
+    const second = orchestrator.getNowPlaying()!;
+    assert.equal(second.kind, 'default');
+    assert.notEqual(second.startedAt, null);
+    assert.ok(second.startedAt! >= first.startedAt!, 'время старта второго трека — не раньше первого');
+    assert.ok(!spotify.calls.includes('play spotify:track:d2'), 'Spotify перешёл сам, без play');
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
