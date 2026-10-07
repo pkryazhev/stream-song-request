@@ -120,3 +120,66 @@ test('stop() (скип) сразу завершает ожидание, даже
   await session.finished;
   assert.ok(Date.now() - started < 1000);
 });
+
+test('следующий трек в очереди Spotify (prepareNext → true): плеер не обрывает трек, а ждёт, пока Spotify переключится сам', async () => {
+  const spotify = scripted([
+    playing(0),
+    playing(190_000), // осталось 10 с — пора ставить следующий в очередь
+    playing(190_500),
+    playing(199_000),
+    playing(199_900),
+    playing(0, 200_000, 'spotify:track:next'), // Spotify сам перешёл на следующий
+  ]);
+  let prepares = 0;
+  let polls = 0;
+  const counting: SpotifyPlayerApi = {
+    ...spotify,
+    getCurrentPlayback: async () => {
+      polls++;
+      return spotify.getCurrentPlayback();
+    },
+  };
+  await playSpotifyTrack(counting, URI, {
+    ...OPTS,
+    prepareNext: async () => {
+      prepares++;
+      return true;
+    },
+  }).finished;
+  assert.equal(prepares, 1);
+  assert.equal(polls, 6, 'трек закончился только когда Spotify ушёл на следующий');
+  assert.deepEqual(spotify.calls, [`play ${URI}`]);
+});
+
+test('следующий трек не из Spotify (prepareNext → false): трек доигрывается по часам', async () => {
+  const spotify = scripted([playing(0), playing(190_000), playing(199_500)]);
+  let prepares = 0;
+  await playSpotifyTrack(spotify, URI, {
+    ...OPTS,
+    prepareNext: async () => {
+      prepares++;
+      return false;
+    },
+  }).finished;
+  assert.equal(prepares, 1);
+  assert.deepEqual(spotify.calls, [`play ${URI}`]);
+});
+
+test('трек из очереди Spotify (queued): Spotify уже играет его — ни "play", ни "next"', async () => {
+  const spotify = scripted([playing(0), playing(199_500)]);
+  await playSpotifyTrack(spotify, URI, { ...OPTS, queued: true }).finished;
+  assert.deepEqual(spotify.calls, []);
+});
+
+test('трек из очереди Spotify, а прошлый скипнули посреди — один "следующий"', async () => {
+  const spotify = scripted([playing(50_000, 200_000, 'spotify:track:prev'), playing(0), playing(199_500)]);
+  await playSpotifyTrack(spotify, URI, { ...OPTS, queued: true }).finished;
+  assert.deepEqual(spotify.calls, ['next']);
+});
+
+test('трек из очереди Spotify, а прошлый ещё в самом конце — ждём, пока Spotify переключится сам', async () => {
+  const prevAtEnd: State = { isPlaying: false, progressMs: 199_800, durationMs: 200_000, trackUri: 'spotify:track:prev' };
+  const spotify = scripted([prevAtEnd, playing(0), playing(199_500)]);
+  await playSpotifyTrack(spotify, URI, { ...OPTS, queued: true }).finished;
+  assert.deepEqual(spotify.calls, []);
+});

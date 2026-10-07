@@ -41,3 +41,11 @@ test('replaceDefaultTracks полностью заменяет старое со
 test('пустая таблица — undefined', () => {
   assert.equal(peekNextDefaultTrack(), undefined);
 });
+
+test('peekNextDefaultTrack(excludeId) пропускает играющий сейчас трек', () => {
+  replaceDefaultTracks([t(1), t(2)]);
+  const first = peekNextDefaultTrack()!;
+  assert.equal(peekNextDefaultTrack(first.id)!.playUri, 'spotify:track:2');
+  removeDefaultTrack(peekNextDefaultTrack(first.id)!.id);
+  assert.equal(peekNextDefaultTrack(first.id), undefined);
+});

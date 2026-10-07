@@ -18,6 +18,20 @@ export interface SpotifyTrackPlayerOptions {
   pollIntervalMs: number;
   /** Как часто опрашивать, пока ждём, что трек начал играть, мс (по умолчанию 1 с, но не реже pollIntervalMs). */
   startPollIntervalMs?: number;
+  /**
+   * Трек уже стоит в очереди Spotify (его поставил туда prepareNext прошлого
+   * трека). Тогда он не запускается заново: Spotify переключается на него сам,
+   * а если прошлый трек скипнули — хватает одного "следующий".
+   */
+  queued?: boolean;
+  /**
+   * Вызывается один раз, когда до конца трека остаётся PREPARE_NEXT_LEAD_MS.
+   * true — следующий трек поставлен в очередь Spotify: плеер не отдаёт
+   * управление раньше конца, а ждёт, пока Spotify переключится сам.
+   * false — следующий трек не из Spotify (или его нет): управление отдаётся
+   * за HANDOFF_EARLY_MS до конца, чтобы оркестратор успел поставить паузу.
+   */
+  prepareNext?: () => Promise<boolean>;
 }
 
 /** Сколько опросов подряд ждать, пока трек начнёт играть, прежде чем сдаться. */
@@ -29,17 +43,30 @@ const MAX_EXTRA_SKIPS = 3;
 /** Сколько сетевых сбоев подряд терпеть. */
 const MAX_CONSECUTIVE_ERRORS = 5;
 /**
+ * За сколько до конца трека звать prepareNext. С запасом: постановка в
+ * очередь — это сетевой запрос, и он должен успеть задолго до конца трека.
+ */
+const PREPARE_NEXT_LEAD_MS = 15_000;
+/**
  * Когда до конца трека остаётся меньше этого — перестаём опрашивать и просто
- * дожидаемся конца по часам. Опрос ближе к концу бессмыслен: Spotify может
- * уже переключиться на что-то своё (автовоспроизведение).
+ * дожидаемся конца по часам (если следующий трек не стоит в очереди Spotify).
  */
 const END_LEAD_MS = 2000;
 /**
- * На сколько раньше конца трека отдавать управление дальше. Совсем чуть-чуть:
- * если дождаться ровно конца, Spotify успевает включить своё
- * автовоспроизведение, и оно на долю секунды прорывается между треками.
+ * На сколько раньше конца трека отдавать управление, если следующий трек не
+ * в очереди Spotify. После этого оркестратор ставит Spotify на паузу, а это
+ * сетевой запрос: если он опоздает, Spotify успеет включить своё
+ * автовоспроизведение. Лучше обрезать последнюю секунду трека.
  */
-const HANDOFF_EARLY_MS = 300;
+const HANDOFF_EARLY_MS = 1000;
+/** Как часто опрашивать около конца трека, пока ждём, что Spotify сам переключится на следующий. */
+const NEAR_END_POLL_MS = 500;
+/**
+ * Сколько ждать, что Spotify сам переключится на трек из очереди: и в конце
+ * прошлого трека (после его расчётного конца), и при старте заранее
+ * поставленного трека. Дольше — считаем, что само не переключится.
+ */
+const QUEUED_SWITCH_GRACE_MS = 3000;
 /** Трек на паузе ближе этого к концу (или на нуле) — считаем, что он закончился. */
 const ENDED_NEAR_END_MS = 2500;
 
@@ -52,11 +79,15 @@ const ENDED_NEAR_END_MS = 2500;
  *     именно наш трек. Если играет чужой (застрял в очереди Spotify) —
  *     жмём "следующий", пока не дойдём до нашего. Если ничего не играет —
  *     через несколько опросов повторяем запуск. Не заиграл совсем — ошибка.
+ *     Если трек заранее поставлен в очередь (options.queued) — playTrackUri
+ *     не нужен: ждём, пока Spotify переключится сам, иначе жмём "следующий".
  *  2. Трек играет. Конец — это когда Spotify переключился на другой трек или
  *     остановился в самом конце. Ручная пауза посреди трека концом не
  *     считается — ждём дальше. Единичный сетевой сбой — тоже.
- *  3. Последние секунды не обрезаются: когда до конца остаётся END_LEAD_MS,
- *     ждём по часам почти до самого конца (без HANDOFF_EARLY_MS).
+ *  3. За PREPARE_NEXT_LEAD_MS до конца — prepareNext(). Если следующий трек
+ *     встал в очередь Spotify, ждём, пока Spotify на него переключится (это
+ *     и есть бесшовный переход). Если нет — за END_LEAD_MS до конца ждём по
+ *     часам и отдаём управление за HANDOFF_EARLY_MS до конца.
  *
  * stop() (скип) просто прекращает ожидание — что играть дальше (или
  * поставить Spotify на паузу), решает оркестратор.
@@ -81,29 +112,67 @@ export function playSpotifyTrack(
       wake = done;
     });
 
-  const poll = async (): Promise<Awaited<ReturnType<SpotifyPlayerApi['getCurrentPlayback']>> | 'error'> => {
+  /**
+   * Состояние плеера и сколько длился запрос: progressMs Spotify измерил
+   * где-то во время запроса, так что к моменту ответа трек уже продвинулся.
+   */
+  const poll = async (): Promise<{
+    pb: Awaited<ReturnType<SpotifyPlayerApi['getCurrentPlayback']>> | 'error';
+    latencyMs: number;
+  }> => {
+    const startedAt = Date.now();
     try {
-      return await spotify.getCurrentPlayback();
+      const pb = await spotify.getCurrentPlayback();
+      return { pb, latencyMs: Date.now() - startedAt };
     } catch (err) {
       logger.error('playback', 'Не удалось опросить Spotify (временный сбой?)', err);
-      return 'error';
+      return { pb: 'error', latencyMs: 0 };
     }
   };
 
-  const finished = (async () => {
-    await spotify.playTrackUri(uri);
+  /**
+   * Старт заранее поставленного трека. true — Spotify уже играет его.
+   * false — дальше обычное ожидание старта; если Spotify сам не переключился
+   * (прошлый трек скипнули или остановили !pr посреди) — нажат "следующий".
+   */
+  const startQueued = async (): Promise<boolean> => {
+    const deadline = Date.now() + QUEUED_SWITCH_GRACE_MS;
+    for (;;) {
+      const { pb } = await poll();
+      if (stopped) return false;
+      if (pb !== 'error' && pb?.trackUri === uri) {
+        // Наш трек, но на паузе — "следующий" его бы пропустил; разберётся обычное ожидание старта.
+        return pb.isPlaying;
+      }
+      // Прошлый трек ещё посреди (скип, !pr) — сам Spotify до нашего не дойдёт.
+      // В самом конце трека (или без ответа) — даём Spotify время переключиться самому.
+      const midTrack = pb !== 'error' && pb !== null && pb.durationMs - pb.progressMs > ENDED_NEAR_END_MS;
+      if (midTrack || Date.now() >= deadline) break;
+      await sleep(NEAR_END_POLL_MS);
+    }
+    await spotify.skipToNext();
+    return false;
+  };
 
+  const finished = (async () => {
     // --- 1. Ждём, пока заиграет именно наш трек ---
+    let started = false;
+    if (options.queued) {
+      started = await startQueued();
+    } else {
+      await spotify.playTrackUri(uri);
+    }
+    if (stopped) return;
+
     const startPollMs = options.startPollIntervalMs ?? Math.min(1000, options.pollIntervalMs);
     let errors = 0;
     let idlePolls = 0;
     let foreignPolls = 0;
     let extraSkips = 0;
-    let started = false;
-    for (let attempt = 0; attempt < MAX_START_POLLS && !stopped; attempt++) {
+    for (let attempt = 0; attempt < MAX_START_POLLS && !stopped && !started; attempt++) {
       await sleep(startPollMs);
       if (stopped) return;
-      const pb = await poll();
+      const { pb } = await poll();
       if (pb === 'error') {
         if (++errors >= MAX_CONSECUTIVE_ERRORS) throw new Error('Spotify не отвечает — не удалось запустить трек');
         continue;
@@ -135,11 +204,13 @@ export function playSpotifyTrack(
 
     // --- 2. Трек играет — ждём конца ---
     errors = 0;
-    let waitMs = options.pollIntervalMs;
+    let prepared = !options.prepareNext;
+    let nextQueued = false;
+    let waitMs = 0;
     for (;;) {
       await sleep(waitMs);
       if (stopped) return;
-      const pb = await poll();
+      const { pb, latencyMs } = await poll();
       if (pb === 'error') {
         if (++errors >= MAX_CONSECUTIVE_ERRORS) {
           throw new Error('Spotify перестал отвечать посреди трека — перехожу к следующему');
@@ -152,7 +223,7 @@ export function playSpotifyTrack(
       // Spotify ушёл на другой трек или устройство пропало — наш закончился (или его переключили вручную).
       if (!pb || pb.trackUri !== uri) return;
 
-      const remaining = pb.durationMs - pb.progressMs;
+      const remaining = pb.durationMs - pb.progressMs - latencyMs;
       if (!pb.isPlaying) {
         if (pb.progressMs === 0 || remaining <= ENDED_NEAR_END_MS) return;
         // Пауза посреди трека (например, стример нажал паузу в Spotify) — ждём.
@@ -160,12 +231,32 @@ export function playSpotifyTrack(
         continue;
       }
 
+      if (!prepared && remaining <= PREPARE_NEXT_LEAD_MS) {
+        prepared = true;
+        nextQueued = await options.prepareNext!();
+        if (stopped) return;
+        waitMs = 0; // постановка в очередь заняла время — сразу уточняем, сколько осталось
+        continue;
+      }
+
+      if (nextQueued) {
+        // --- 3а. Следующий трек в очереди Spotify — он переключится сам ---
+        // Страховка: трек давно должен был кончиться, а Spotify всё "играет" его.
+        if (remaining <= -QUEUED_SWITCH_GRACE_MS) return;
+        waitMs = remaining > END_LEAD_MS ? Math.min(options.pollIntervalMs, remaining - END_LEAD_MS) : NEAR_END_POLL_MS;
+        continue;
+      }
+
       if (remaining <= END_LEAD_MS) {
-        // --- 3. Доигрываем хвост по часам ---
+        // --- 3б. Доигрываем хвост по часам ---
         await sleep(Math.max(remaining - HANDOFF_EARLY_MS, 0));
         return;
       }
-      waitMs = Math.min(options.pollIntervalMs, remaining - END_LEAD_MS);
+      waitMs = Math.min(
+        options.pollIntervalMs,
+        remaining - END_LEAD_MS,
+        prepared ? Infinity : remaining - PREPARE_NEXT_LEAD_MS,
+      );
     }
   })();
 

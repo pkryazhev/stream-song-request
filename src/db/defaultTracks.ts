@@ -48,11 +48,14 @@ export function replaceDefaultTracks(tracks: NewDefaultTrack[]): void {
   }
 }
 
-/** Следующий трек дефолтного плейлиста (не удаляет его). */
-export function peekNextDefaultTrack(): DefaultTrack | undefined {
-  const row = getDb().prepare('SELECT * FROM default_tracks ORDER BY id LIMIT 1').get() as
-    | DefaultTrackRow
-    | undefined;
+/**
+ * Следующий трек дефолтного плейлиста (не удаляет его). excludeId — пропустить
+ * этот трек: так оркестратор узнаёт, что играть после текущего.
+ */
+export function peekNextDefaultTrack(excludeId?: number): DefaultTrack | undefined {
+  const row = getDb()
+    .prepare('SELECT * FROM default_tracks WHERE id != ? ORDER BY id LIMIT 1')
+    .get(excludeId ?? -1) as DefaultTrackRow | undefined;
   if (!row) return undefined;
   return {
     id: row.id,
