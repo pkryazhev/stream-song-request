@@ -123,6 +123,7 @@ const spotifyObserved: SpotifyPlaybackLike | null = spotify && {
     await spotify.playTrackUri(uri);
   },
   skipToNext: () => spotify.skipToNext(),
+  queueTrack: (uri) => spotify.queueTrack(uri),
   pause: () => spotify.pause(),
 };
 

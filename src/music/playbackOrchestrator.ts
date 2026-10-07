@@ -6,8 +6,9 @@ import type { QueuedSongRequest } from '../db/musicQueue.ts';
 import type { DefaultTrack, NewDefaultTrack } from '../db/defaultTracks.ts';
 import type { SongProvider } from '../core/events.ts';
 
-/** Что оркестратору нужно от Spotify: запуск/опрос трека (плеер) и пауза. */
+/** Что оркестратору нужно от Spotify: запуск/опрос трека (плеер), очередь и пауза. */
 export interface SpotifyPlaybackLike extends SpotifyPlayerApi {
+  queueTrack(uri: string): Promise<void>;
   pause(): Promise<void>;
 }
 
@@ -25,7 +26,8 @@ export interface QueueLike {
 
 /** Таблица треков дефолтного плейлиста (db/defaultTracks.ts). */
 export interface DefaultTracksLike {
-  peekNext(): DefaultTrack | undefined;
+  /** Первый трек таблицы; excludeId — пропустить этот трек (тот, что играет сейчас). */
+  peekNext(excludeId?: number): DefaultTrack | undefined;
   remove(id: number): void;
   replaceAll(tracks: NewDefaultTrack[]): void;
 }
@@ -80,6 +82,12 @@ const DEFAULT_REIMPORT_RETRY_MS = 60_000;
  * Треки Spotify играет Spotify (через Spotify Connect, см.
  * spotifyTrackPlayer.ts), остальные — mpv. Перед треком mpv и когда играть
  * нечего Spotify ставится на паузу, иначе он продолжил бы играть что-то своё.
+ *
+ * Spotify → Spotify: незадолго до конца Spotify-трека следующий трек, если он
+ * тоже из Spotify, заранее ставится в очередь Spotify (queueNextSpotifyTrack),
+ * и Spotify переключается на него сам — без паузы и без чужого трека между
+ * ними. Выбор следующего трека при этом фиксируется: заказ, пришедший после
+ * этого, сыграет через один трек (удалить трек из очереди Spotify нельзя).
  */
 export class PlaybackOrchestrator {
   private readonly spotify: SpotifyPlaybackLike | null;
@@ -92,6 +100,8 @@ export class PlaybackOrchestrator {
   private stopped = false;
   private running: Promise<void> | undefined;
   private current: { item: Item; stop?: () => void } | null = null;
+  /** Следующий трек, уже поставленный в очередь Spotify: играет следующим, что бы ни пришло после. */
+  private queuedNext: Item | null = null;
   /** true — текущий дефолтный трек остановлен командой !pr: из таблицы его не удаляем. */
   private haltRequested = false;
   /** Spotify мог что-то играть: был наш трек или его запустили до старта приложения. */
@@ -214,11 +224,40 @@ export class PlaybackOrchestrator {
   }
 
   private pickNext(): Item | null {
+    // Трек из очереди Spotify — первым; дефолтный на паузе (!pr) ждёт её снятия.
+    const queued = this.queuedNext;
+    if (queued && (queued.kind === 'request' || !isRequestsPaused())) return queued;
+    return this.peekNext();
+  }
+
+  /** Что играть следующим по правилам очередей. excludeDefaultId — дефолтный трек, который играет сейчас. */
+  private peekNext(excludeDefaultId?: number): Item | null {
     const request = this.requests.peekNextPending();
     if (request) return { kind: 'request', track: request };
     if (isRequestsPaused()) return null;
-    const def = this.defaults.peekNext();
+    const def = this.defaults.peekNext(excludeDefaultId);
     return def ? { kind: 'default', track: def } : null;
+  }
+
+  /**
+   * Вызывается плеером Spotify незадолго до конца текущего трека (prepareNext).
+   * Если следующий трек тоже из Spotify — ставит его в очередь Spotify и
+   * закрепляет за ним следующую очередь в pickNext. true — поставлен.
+   */
+  private async queueNextSpotifyTrack(current: Item): Promise<boolean> {
+    // Уже есть закреплённый трек (например, дефолтный, ждущий снятия !pr) — второй не ставим.
+    if (!this.spotify || this.stopped || this.queuedNext) return false;
+    const next = this.peekNext(current.kind === 'default' ? current.track.id : undefined);
+    if (!next || next.track.provider !== 'spotify') return false;
+    try {
+      await this.spotify.queueTrack(next.track.playUri);
+    } catch (err) {
+      logger.error('playback', `Не удалось заранее поставить "${next.track.title}" в очередь Spotify`, err);
+      return false;
+    }
+    this.queuedNext = next;
+    logger.info('playback', `Следующий трек заранее поставлен в очередь Spotify: "${next.track.title}"`);
+    return true;
   }
 
   private shouldReimport(): boolean {
@@ -244,6 +283,8 @@ export class PlaybackOrchestrator {
   /** Играет один трек до конца. false — воспроизведение не удалось. */
   private async play(item: Item): Promise<boolean> {
     const { track } = item;
+    const queued = item === this.queuedNext;
+    if (queued) this.queuedNext = null;
     if (item.kind === 'request') this.requests.markPlaying(item.track.id);
     this.current = { item };
     eventBus.emit('song.now_playing', {
@@ -262,7 +303,11 @@ export class PlaybackOrchestrator {
       if (track.provider === 'spotify') {
         if (!this.spotify) throw new Error('трек Spotify, но Spotify не настроен');
         this.spotifyMayBePlaying = true;
-        session = playSpotifyTrack(this.spotify, track.playUri, { pollIntervalMs: this.cfg.pollIntervalMs });
+        session = playSpotifyTrack(this.spotify, track.playUri, {
+          pollIntervalMs: this.cfg.pollIntervalMs,
+          queued,
+          prepareNext: () => this.queueNextSpotifyTrack(item),
+        });
       } else {
         await this.silenceSpotify();
         session = this.mpv.play(track.playUri);

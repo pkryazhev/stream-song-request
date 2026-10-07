@@ -127,10 +127,14 @@ export class SpotifyPlaybackController {
    * между решением "пора переключаться" и реальным запуском трека, из-за
    * чего можно было не успеть до того, как предыдущий трек естественным
    * образом закончится сам (см. подробности в README, раздел про
-   * playTrackUri). TTL короткий — если пользователь переключит активное
-   * устройство, это подхватится максимум через несколько секунд.
+   * playTrackUri).
+   *
+   * TTL длиннее трека: иначе к концу каждого трека кэш уже протухал, и
+   * пауза перед mpv-треком ждала лишний GET /devices. Если id устройства
+   * сменился (Spotify перезапустили), первый же неудачный запрос сбрасывает
+   * кэш (forgetDeviceOnFailure), и следующий резолвит id заново.
    */
-  private static readonly DEVICE_ID_CACHE_MS = 15_000;
+  private static readonly DEVICE_ID_CACHE_MS = 10 * 60_000;
   private cachedDeviceId: { id: string; expiresAt: number } | undefined;
 
   /**
@@ -207,7 +211,12 @@ export class SpotifyPlaybackController {
     await this.skipToNext();
   }
 
-  private async queueTrack(uri: string): Promise<void> {
+  /**
+   * Добавляет трек в очередь Spotify. Кроме playTrackUri, используется
+   * оркестратором, чтобы заранее поставить следующий трек: тогда Spotify
+   * переключается на него сам, без паузы и без прорыва автовоспроизведения.
+   */
+  async queueTrack(uri: string): Promise<void> {
     const deviceId = await this.resolveDeviceId();
     const url = new URL('https://api.spotify.com/v1/me/player/queue');
     url.searchParams.set('uri', uri);
@@ -216,6 +225,7 @@ export class SpotifyPlaybackController {
       method: 'POST',
       headers: await this.authHeaders(),
     });
+    this.forgetDeviceOnFailure(res);
     if (!res.ok && res.status !== 204) {
       throw new Error(this.playbackErrorMessage('добавить трек в очередь', res.status));
     }
@@ -288,6 +298,7 @@ export class SpotifyPlaybackController {
       method: 'PUT',
       headers: await this.authHeaders(),
     });
+    this.forgetDeviceOnFailure(res);
     if (!res.ok && res.status !== 204 && res.status !== 404) {
       throw new Error(this.playbackErrorMessage('поставить Spotify на паузу', res.status));
     }
@@ -303,9 +314,15 @@ export class SpotifyPlaybackController {
       method: 'POST',
       headers: await this.authHeaders(),
     });
+    this.forgetDeviceOnFailure(res);
     if (!res.ok && res.status !== 204) {
       throw new Error(this.playbackErrorMessage('скипнуть трек', res.status));
     }
+  }
+
+  /** Запрос к устройству не удался — возможно, у него сменился id: следующий запрос резолвит его заново. */
+  private forgetDeviceOnFailure(res: Response): void {
+    if (!res.ok) this.cachedDeviceId = undefined;
   }
 
   private playbackErrorMessage(action: string, status: number): string {

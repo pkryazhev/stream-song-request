@@ -49,27 +49,55 @@ class FakeMpv implements YoutubePlayerLike {
   }
 }
 
-/** Spotify-устройство: запущенный трек проигрывается за пару опросов. */
+/**
+ * Spotify-устройство с очередью: трек продвигается на stepMs за опрос; в
+ * конце трека Spotify сам переходит к следующему в очереди, а если она
+ * пуста — останавливается.
+ */
 class FakeSpotify implements SpotifyPlaybackLike {
   calls: string[] = [];
+  private queue: string[] = [];
   private uri: string | null = null;
   private progress = 0;
+  private readonly durationMs: number;
+  private readonly stepMs: number;
+
+  // По умолчанию второй опрос — "осталось меньше 2 с", трек доигрывается.
+  constructor(durationMs = 1000, stepMs = 700) {
+    this.durationMs = durationMs;
+    this.stepMs = stepMs;
+  }
 
   async playTrackUri(uri: string): Promise<void> {
     this.calls.push(`play ${uri}`);
     this.uri = uri;
     this.progress = 0;
   }
+  async queueTrack(uri: string): Promise<void> {
+    this.calls.push(`queue ${uri}`);
+    this.queue.push(uri);
+  }
   async skipToNext(): Promise<void> {
     this.calls.push('next');
+    const next = this.queue.shift();
+    if (next) {
+      this.uri = next;
+      this.progress = 0;
+    }
   }
   async pause(): Promise<void> {
     this.calls.push('pause');
   }
   async getCurrentPlayback() {
     if (!this.uri) return null;
-    const state = { isPlaying: true, progressMs: this.progress, durationMs: 1000, trackUri: this.uri };
-    this.progress += 700; // второй опрос — "осталось меньше 2 с", трек доигрывается
+    if (this.progress >= this.durationMs) {
+      const next = this.queue.shift();
+      if (!next) return { isPlaying: false, progressMs: this.durationMs, durationMs: this.durationMs, trackUri: this.uri };
+      this.uri = next;
+      this.progress = 0;
+    }
+    const state = { isPlaying: true, progressMs: this.progress, durationMs: this.durationMs, trackUri: this.uri };
+    this.progress += this.stepMs;
     return state;
   }
 }
@@ -111,8 +139,8 @@ class FakeRequests implements QueueLike {
 class FakeDefaults implements DefaultTracksLike {
   rows: DefaultTrack[] = [];
   private nextId = 1;
-  peekNext() {
-    return this.rows[0];
+  peekNext(excludeId?: number) {
+    return this.rows.find((r) => r.id !== excludeId);
   }
   remove(id: number) {
     this.rows = this.rows.filter((r) => r.id !== id);
@@ -398,20 +426,43 @@ test('song.now_playing: у заказа есть заказчик, у дефол
   }
 });
 
-test('Spotify: треки подряд без лишних пауз; перед mpv и когда играть нечего — пауза', async () => {
+test('Spotify → Spotify: следующий трек заранее встаёт в очередь Spotify, и Spotify переключается сам; перед mpv — пауза', async () => {
   const spotify = new FakeSpotify();
   const { mpv, requests, orchestrator, done } = setup({
     spotify,
     playlist: [def(1, 'spotify'), def(2, 'spotify')],
   });
   try {
-    await until(() => spotify.calls.includes('play spotify:track:d2'), 'второй Spotify-трек');
+    await until(() => spotify.calls.includes('queue spotify:track:d2'), 'второй трек в очереди Spotify');
+    // Заказ пришёл, когда следующий трек уже в очереди Spotify, — играет после него.
     requests.add('youtube', 'https://yt/a');
     await until(() => mpv.played.length === 1, 'YouTube-заказ после Spotify');
-    const beforeMpv = spotify.calls.slice();
-    // Между двумя Spotify-треками паузы нет; перед mpv — есть.
-    assert.deepEqual(beforeMpv.slice(0, 2), ['play spotify:track:d1', 'play spotify:track:d2']);
-    assert.equal(beforeMpv.at(-1), 'pause');
+    // Ни "play", ни "next" для второго трека: Spotify перешёл на него сам. Перед mpv — пауза.
+    assert.deepEqual(spotify.calls, ['play spotify:track:d1', 'queue spotify:track:d2', 'pause']);
+  } finally {
+    orchestrator.stop();
+    await done;
+  }
+});
+
+test('скип трека, когда следующий уже в очереди Spotify, — один "следующий", без повторной постановки', async () => {
+  // Трек стоит посреди и сам не кончится; до конца меньше 15 с — следующий ставится в очередь сразу.
+  const spotify = new FakeSpotify(10_000, 0);
+  const { defaults, orchestrator, done } = setup({
+    spotify,
+    playlist: [def(1, 'spotify'), def(2, 'spotify'), def(3, 'spotify')],
+  });
+  try {
+    await until(() => spotify.calls.includes('queue spotify:track:d2'), 'второй трек в очереди Spotify');
+    assert.equal(orchestrator.skipDefaultPlaylist(), true);
+    await until(() => spotify.calls.includes('queue spotify:track:d3'), 'второй трек заиграл, третий в очереди');
+    assert.deepEqual(spotify.calls, [
+      'play spotify:track:d1',
+      'queue spotify:track:d2',
+      'next',
+      'queue spotify:track:d3',
+    ]);
+    assert.deepEqual(defaults.uris(), ['spotify:track:d2', 'spotify:track:d3']);
   } finally {
     orchestrator.stop();
     await done;
