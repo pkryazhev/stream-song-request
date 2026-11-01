@@ -211,6 +211,12 @@ const spotify =
       }
     : null;
 
+function seconds(name: string, fallback: number, min = 0): number {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isFinite(value) || value < min) throw new Error(name + ' должен быть числом не меньше ' + min);
+  return value;
+}
+
 export const config = {
   twitch: {
     clientId: required('TWITCH_CLIENT_ID'),
@@ -239,6 +245,7 @@ export const config = {
     // Модератор скипает сразу (и заказ, и трек дефолтного плейлиста), только
     // если moderatorCanSkip (иначе голосует, как зритель). Заказчик
     // скипает свой заказ сразу, только если requesterCanSkipOwnRequest.
+    skipDelaySec: seconds('MUSIC_SKIP_DELAY_SEC', 15),
     skipCommand: process.env.MUSIC_SKIP_COMMAND ?? '!skip',
     skipThresholdPercent: Number(process.env.MUSIC_SKIP_THRESHOLD_PERCENT ?? 30),
     moderatorCanSkip,
@@ -307,6 +314,9 @@ export const config = {
     : null,
   // Параметры цикла оркестратора воспроизведения (см. playbackOrchestrator.ts).
   playback: {
+    youtubeStartupMs: seconds('YOUTUBE_STARTUP_TIMEOUT_SEC', 60, 1) * 1000,
+    yandexStartupMs: seconds('YANDEX_STARTUP_TIMEOUT_SEC', 30, 1) * 1000,
+    spotifyStartupMs: seconds('SPOTIFY_STARTUP_TIMEOUT_SEC', 30, 1) * 1000,
     pollIntervalMs: spotifyPollIntervalMs,
     shuffleDefaultPlaylist,
   },

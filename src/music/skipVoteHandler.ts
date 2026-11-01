@@ -24,6 +24,7 @@ export interface SkipVoteHandlerConfig {
 /** Минимальный контракт оркестратора, который нужен обработчику скипа. */
 export interface SkipableOrchestrator {
   getMode(): 'default' | 'request';
+  canSkip?(): boolean;
   skip(): boolean;
   skipDefaultPlaylist(): boolean;
 }
@@ -106,6 +107,7 @@ export function registerSkipVoteHandler(
     const [cmd] = msg.text.trim().split(/\s+/);
     if (!cmd || cmd.toLowerCase() !== cfg.commandName.toLowerCase()) return;
 
+    if (orchestrator.canSkip && !orchestrator.canSkip()) return;
     const isRequestMode = orchestrator.getMode() === 'request';
 
     const canSkipInstantly =
@@ -139,6 +141,7 @@ export function registerSkipVoteHandler(
       return;
     }
 
+    if (generation !== trackGeneration || (orchestrator.canSkip && !orchestrator.canSkip())) return;
     const result = tracker.vote(msg.userId);
     if (result === 'closed') return;
     // Снимок до doSkip: смена трека сбросит голоса и порог.

@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 /** Разбор длительности вида ISO 8601 ("PT10M13S", "PT1H2M", "PT45S") в секунды. */
 export function parseIso8601DurationToSeconds(iso: string): number {
   const match = iso.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
@@ -17,7 +18,7 @@ export interface YoutubeVideoDetails {
 export async function fetchYoutubeVideoDetails(
   videoId: string,
   apiKey: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<YoutubeVideoDetails | null> {
   const url = new URL('https://www.googleapis.com/youtube/v3/videos');
   url.searchParams.set('part', 'snippet,contentDetails');

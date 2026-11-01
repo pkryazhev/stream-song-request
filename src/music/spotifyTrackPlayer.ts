@@ -20,6 +20,8 @@ export interface SpotifyPlayerApi {
 export interface SpotifyTrackPlayerOptions {
   /** Как часто опрашивать Spotify, пока трек играет, мс (SPOTIFY_POLL_INTERVAL_MS). */
   pollIntervalMs: number;
+  startupTimeoutMs?: number;
+  onStarted?: () => void;
   /** Как часто опрашивать, пока ждём, что трек начал играть, мс (по умолчанию 1 с, но не реже pollIntervalMs). */
   startPollIntervalMs?: number;
   /**
@@ -218,11 +220,16 @@ export function playSpotifyTrack(
       await sleep(NEAR_END_POLL_MS);
     }
     logger.warn('playback', `Spotify сам не переключился на трек из очереди ${uri} — жму "следующий"${await diagnose()}`);
+    if (stopped) return false;
     await spotify.skipToNext();
     return false;
   };
 
-  const finished = (async () => {
+  let startupTimer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    startupTimer = setTimeout(() => { stopped = true; wake?.(); reject(new Error('Spotify: превышено время запуска')); }, options.startupTimeoutMs ?? 30_000);
+  });
+  const playback = (async () => {
     // --- 1. Ждём, пока заиграет именно наш трек ---
     let started = false;
     if (options.queued) {
@@ -260,6 +267,7 @@ export function playSpotifyTrack(
             'playback',
             `Spotify играет не тот трек (${pb.trackUri}) — переключаю на следующий в очереди${await diagnose()}`,
           );
+          if (stopped) return;
           await spotify.skipToNext();
         }
         continue;
@@ -273,6 +281,8 @@ export function playSpotifyTrack(
     if (stopped) return;
     if (!started) throw new Error(`Spotify так и не начал играть трек ${uri}${await diagnose()}`);
 
+    clearTimeout(startupTimer);
+    options.onStarted?.();
     // --- 2. Трек играет — ждём конца ---
     errors = 0;
     let prepared = !options.prepareNext;
@@ -331,10 +341,12 @@ export function playSpotifyTrack(
     }
   })();
 
+  const finished = Promise.race([playback, deadline]).finally(() => clearTimeout(startupTimer));
   return {
     finished,
     stop: () => {
       stopped = true;
+      clearTimeout(startupTimer);
       wake?.();
     },
   };

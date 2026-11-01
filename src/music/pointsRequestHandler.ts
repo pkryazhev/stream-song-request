@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 import { eventBus } from '../core/eventBus.ts';
 import { logger } from '../core/logger.ts';
 import { processSongRequest, describeLinkSources, type RequestHandlerConfig, type SongRequestOutcome } from './requestHandler.ts';
@@ -20,19 +21,28 @@ function reply(text: string): void {
 }
 
 /** Подписывает обработчик заказов за баллы канала на активации награды. */
-export function registerPointsRequestHandler(cfg: PointsRequestHandlerConfig, fetchImpl: typeof fetch = fetch): () => void {
+export function registerPointsRequestHandler(cfg: PointsRequestHandlerConfig, fetchImpl: typeof fetch = timedFetch): () => void {
   const onRedeemed = (redemption: RewardRedeemedEvent): void => {
     void handleRedemption(redemption, cfg, fetchImpl);
   };
+  const onSettled = (e: { redemption: RewardRedeemedEvent; confirmed: boolean }): void => {
+    void cfg.setRedemptionStatus(e.redemption, e.confirmed ? 'FULFILLED' : 'CANCELED').catch((err) => {
+      logger.error('music', 'Не удалось обработать награду ' + e.redemption.redemptionId + ' — обработай вручную в Twitch', err);
+    });
+  };
+  eventBus.on('song.request_settled', onSettled);
   eventBus.on('channel_points.redeemed', onRedeemed);
-  return () => eventBus.off('channel_points.redeemed', onRedeemed);
+  return () => {
+    eventBus.off('channel_points.redeemed', onRedeemed);
+    eventBus.off('song.request_settled', onSettled);
+  };
 }
 
 /**
  * Одна активация награды "заказ музыки": те же правила, что и у команды
  * заказа (см. processSongRequest), кроме проверки фолловинга — за баллы
- * может заказывать любой зритель. Трек встал в очередь — активация
- * выполнена; не встал по любой причине (включая непредвиденную ошибку) —
+ * может заказывать любой зритель. Spotify подтверждается при постановке
+ * в очередь, остальные источники — после проверки воспроизведения; при отказе
  * активация отклоняется, и Twitch сам возвращает зрителю баллы.
  *
  * В Privilege-режиме заказ стримера, модератора или VIP, вставший в очередь,
@@ -41,7 +51,7 @@ export function registerPointsRequestHandler(cfg: PointsRequestHandlerConfig, fe
 export async function handleRedemption(
   redemption: RewardRedeemedEvent,
   cfg: PointsRequestHandlerConfig,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<void> {
   const requester = {
     userId: redemption.userId,
@@ -50,10 +60,12 @@ export async function handleRedemption(
     isBroadcaster: redemption.userId === cfg.request.twitchBroadcasterId,
   };
 
+  const free = await isFreeRequest(redemption, requester.isBroadcaster, cfg);
+  const paidRequester = { ...requester, redemption: free ? undefined : redemption };
   let outcome: SongRequestOutcome;
   try {
     outcome = await processSongRequest(
-      requester,
+      paidRequester,
       redemption.userInput,
       cfg.request,
       {
@@ -70,7 +82,10 @@ export async function handleRedemption(
     };
   }
 
-  const free = outcome.queued && (await isFreeRequest(redemption, requester.isBroadcaster, cfg));
+  if (outcome.queued && !free && outcome.provider !== 'spotify') {
+    reply(outcome.replyText);
+    return;
+  }
 
   const status: RedemptionStatus = outcome.queued && !free ? 'FULFILLED' : 'CANCELED';
   let statusUpdated = true;
@@ -95,8 +110,7 @@ export async function handleRedemption(
 
 /**
  * Privilege-режим: заказ бесплатный для стримера, модераторов и VIP. Если
- * роль узнать не удалось — заказ платный, как у обычного зрителя (трек уже в
- * очереди, а вернуть баллы стример может и вручную).
+ * роль узнать не удалось — заказ платный, как у обычного зрителя.
  */
 async function isFreeRequest(
   redemption: RewardRedeemedEvent,
@@ -110,7 +124,7 @@ async function isFreeRequest(
   } catch (err) {
     logger.error(
       'music',
-      `Не удалось проверить, модератор или VIP ли ${redemption.userName}, — баллы за заказ списаны как у обычного зрителя`,
+      `Не удалось проверить, модератор или VIP ли ${redemption.userName}, — заказ будет платным`,
       err,
     );
     return false;

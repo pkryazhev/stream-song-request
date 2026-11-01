@@ -16,6 +16,7 @@ export interface PlaybackSession {
    * сессий mpv; нужен проверке перед стримом (scripts/music-check.ts).
    */
   audioStarted?: Promise<void>;
+  playbackConfirmed?: Promise<void>;
 }
 
 /**
@@ -39,6 +40,31 @@ function watchAudioStart(streams: (NodeJS.ReadableStream | null)[]): Promise<voi
         const text = tail + chunk.toString('utf8');
         if (MPV_AUDIO_OUTPUT_LINE_RE.test(text)) resolve();
         tail = text.slice(-16);
+      });
+    }
+  });
+}
+
+export const MPV_PROGRESS_ARGS = ['--term-status-msg=SC_PROGRESS:${=time-pos}'];
+
+/** Count advancing playback, excluding buffering, pauses and large seeks. */
+export function watchPlaybackProgress(streams: (NodeJS.ReadableStream | null)[]): Promise<void> {
+  return new Promise((resolve) => {
+    let previous: number | undefined;
+    let played = 0;
+    for (const stream of streams) {
+      let tail = '';
+      stream?.on('data', (chunk: Buffer) => {
+        const lines = (tail + chunk.toString('utf8')).split(/[\r\n]/);
+        tail = lines.pop()!.slice(-100);
+        for (const line of lines) {
+          const match = /SC_PROGRESS:([0-9]+(?:\.[0-9]+)?)/.exec(line);
+          if (!match) continue;
+          const position = Number(match[1]);
+          if (previous !== undefined && position > previous && position - previous <= 2) played += position - previous;
+          previous = position;
+          if (played >= 3) resolve();
+        }
       });
     }
   });
@@ -83,6 +109,7 @@ export function spawnPlaybackProcess(command: string, args: string[]): PlaybackS
       killProcess(child);
     },
     audioStarted: watchAudioStart([child.stdout, child.stderr]),
+    playbackConfirmed: watchPlaybackProgress([child.stdout, child.stderr]),
   };
 }
 
@@ -227,7 +254,7 @@ export function buildYtdlpInfoArgs(videoUrl: string, options: YoutubePlaybackOpt
 
 /** Как yt-dlp заходит на YouTube: клиент, куки, IPv4 — общее для разбора и скачивания. */
 function buildYtdlpAccessArgs(options: YoutubePlaybackOptions): string[] {
-  const args: string[] = [];
+  const args: string[] = ['--socket-timeout', '10'];
   if (options.playerClient) {
     args.push('--extractor-args', `youtube:player_client=${options.playerClient}`);
   }
@@ -271,6 +298,7 @@ export function buildMpvStdinArgs(options: YoutubePlaybackOptions): string[] {
     '--cache=yes',
     `--demuxer-max-bytes=${MPV_CACHE_MAX_BYTES}`,
     '--no-video',
+    ...MPV_PROGRESS_ARGS,
     '-',
   ];
 }
@@ -324,13 +352,13 @@ export function playYoutubeUrl(
       YTDLP_WORK_DIR,
     );
   if (!preloaded) {
-    return withRetryBeforeAudio(() => spawnAttempt(null), YOUTUBE_PLAYBACK_ATTEMPTS);
+    return withRetryBeforeAudio(() => spawnAttempt(null), YOUTUBE_PLAYBACK_ATTEMPTS, 1000);
   }
   const session = startWhenReady(preloaded.infoJsonPath, (infoJsonPath) =>
-    withRetryBeforeAudio((attempt) => spawnAttempt(attempt === 1 ? infoJsonPath : null), YOUTUBE_PLAYBACK_ATTEMPTS),
+    withRetryBeforeAudio((attempt) => spawnAttempt(attempt === 1 ? infoJsonPath : null), YOUTUBE_PLAYBACK_ATTEMPTS, 1000),
   );
   void session.finished.catch(() => {}).finally(() => preloaded.cancel());
-  return session;
+  return { ...session, stop: () => { preloaded.cancel(); session.stop(); } };
 }
 
 /** Заранее запущенный разбор видео (см. preloadYoutubeInfo). */
@@ -409,6 +437,8 @@ export function preloadYoutubeInfo(videoUrl: string, options: YoutubePlaybackOpt
 function startWhenReady<T>(ready: Promise<T>, start: (value: T) => PlaybackSession): PlaybackSession {
   let stopped = false;
   let inner: PlaybackSession | undefined;
+  let resolveConfirmed!: () => void;
+  const playbackConfirmed = new Promise<void>((resolve) => { resolveConfirmed = resolve; });
   let resolveAudioStarted!: () => void;
   const audioStarted = new Promise<void>((resolve) => {
     resolveAudioStarted = resolve;
@@ -417,6 +447,7 @@ function startWhenReady<T>(ready: Promise<T>, start: (value: T) => PlaybackSessi
     if (stopped) return;
     inner = start(value);
     void inner.audioStarted?.then(resolveAudioStarted);
+    void inner.playbackConfirmed?.then(resolveConfirmed);
     return inner.finished;
   });
   return {
@@ -426,6 +457,7 @@ function startWhenReady<T>(ready: Promise<T>, start: (value: T) => PlaybackSessi
       inner?.stop();
     },
     audioStarted,
+    playbackConfirmed,
   };
 }
 
@@ -464,18 +496,25 @@ const YOUTUBE_PLAYBACK_ATTEMPTS = 3;
  * заново с начала. Сессии без audioStarted не повторяются вообще.
  * Экспортировано отдельно ради юнит-тестов.
  */
-export function withRetryBeforeAudio(start: (attempt: number) => PlaybackSession, attempts: number): PlaybackSession {
+export function withRetryBeforeAudio(start: (attempt: number) => PlaybackSession, attempts: number, retryDelayMs = 0): PlaybackSession {
   let stopped = false;
   let current: PlaybackSession;
+  let resolveConfirmed!: () => void;
+  const playbackConfirmed = new Promise<void>((resolve) => { resolveConfirmed = resolve; });
   let resolveAudioStarted!: () => void;
   const audioStarted = new Promise<void>((resolve) => {
     resolveAudioStarted = resolve;
   });
 
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let wakeRetry: (() => void) | undefined;
   const run = async (attempt: number): Promise<void> => {
     current = start(attempt);
+    const active = current;
+    void active.playbackConfirmed?.then(() => { if (current === active && !stopped) resolveConfirmed(); });
     let started = false;
     void current.audioStarted?.then(() => {
+      if (current !== active || stopped) return;
       started = true;
       resolveAudioStarted();
     });
@@ -483,6 +522,9 @@ export function withRetryBeforeAudio(start: (attempt: number) => PlaybackSession
       await current.finished;
     } catch (err) {
       if (stopped || started || !current.audioStarted || attempt >= attempts) throw err;
+      if (/ENOENT|отклонила токен|только превью|video unavailable|private video|has been removed/i.test(String(err))) throw err;
+      if (retryDelayMs > 0) await new Promise<void>((resolve) => { wakeRetry = resolve; retryTimer = setTimeout(resolve, retryDelayMs); });
+      if (stopped) return;
       return run(attempt + 1);
     }
   };
@@ -494,9 +536,12 @@ export function withRetryBeforeAudio(start: (attempt: number) => PlaybackSession
     finished,
     stop: () => {
       stopped = true;
+      clearTimeout(retryTimer);
+      wakeRetry?.();
       current.stop();
     },
     audioStarted,
+    playbackConfirmed,
   };
 }
 
@@ -562,6 +607,7 @@ export function spawnYtdlpMpvPipeline(
 
   const finished = new Promise<void>((resolve, reject) => {
     mpv.on('exit', (code) => {
+      if (ytdlp.exitCode === null && (stopped || code !== 0)) killProcess(ytdlp);
       void ytdlpDone.then(() => {
         if (stopped) {
           resolve();
@@ -582,7 +628,7 @@ export function spawnYtdlpMpvPipeline(
         reject(new Error(`Процесс плеера "${mpvPath}" завершился с кодом ${code}${suffix}`));
       });
     });
-    mpv.on('error', (err) => reject(err));
+    mpv.on('error', (err) => { killProcess(ytdlp); reject(err); });
   });
 
   return {
@@ -593,5 +639,6 @@ export function spawnYtdlpMpvPipeline(
       killProcess(ytdlp);
     },
     audioStarted: watchAudioStart([mpv.stdout, mpv.stderr]),
+    playbackConfirmed: watchPlaybackProgress([mpv.stdout, mpv.stderr]),
   };
 }

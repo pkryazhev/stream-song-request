@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 import { getSpotifyAppToken } from './spotifyAuth.ts';
 import { logger } from '../core/logger.ts';
 import type { TokenStore } from '../core/tokenStore.ts';
@@ -15,7 +16,7 @@ export async function fetchSpotifyTrackDetails(
   trackId: string,
   clientId: string,
   clientSecret: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<SpotifyTrackDetails | null> {
   const token = await getSpotifyAppToken(clientId, clientSecret, fetchImpl);
 
@@ -94,7 +95,7 @@ export class SpotifyPlaybackController {
 
   constructor(
     userAuth: Pick<TokenStore, 'getValidAccessToken'>,
-    fetchImpl: typeof fetch = fetch,
+    fetchImpl: typeof fetch = timedFetch,
     deviceName?: string,
   ) {
     this.userAuth = userAuth;

@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 import { getSpotifyAppToken } from './spotifyAuth.ts';
 import type { SpotifyTrackDetails } from './spotifyProvider.ts';
 
@@ -27,7 +28,7 @@ export async function searchSpotifyTrackByText(
   query: string,
   clientId: string,
   clientSecret: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<SpotifyTrackDetails | null> {
   const trimmed = query.trim();
   if (!trimmed) return null;

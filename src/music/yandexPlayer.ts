@@ -1,5 +1,6 @@
 import {
   spawnPlaybackProcess,
+  MPV_PROGRESS_ARGS,
   buildVolumeArg,
   buildAudioDeviceArg,
   type PlaybackSession,
@@ -17,7 +18,7 @@ export type YandexPlaybackOptions = Pick<YoutubePlaybackOptions, 'volume' | 'aud
  */
 export function buildMpvUrlArgs(playback: YandexPlayback, options: YandexPlaybackOptions): string[] {
   const gainArg = playback.gainDb ? [`--af=lavfi=[volume=${playback.gainDb}dB]`] : [];
-  return [...buildVolumeArg(options), ...buildAudioDeviceArg(options), ...gainArg, '--no-video', playback.streamUrl];
+  return [...buildVolumeArg(options), ...buildAudioDeviceArg(options), ...gainArg, '--no-video', ...MPV_PROGRESS_ARGS, playback.streamUrl];
 }
 
 /**
@@ -35,6 +36,8 @@ export function playYandexTrack(
   options: YandexPlaybackOptions = {},
   spawn: (command: string, args: string[]) => PlaybackSession = spawnPlaybackProcess,
 ): PlaybackSession {
+  let resolveConfirmed!: () => void;
+  const playbackConfirmed = new Promise<void>((resolve) => { resolveConfirmed = resolve; });
   let stopped = false;
   let inner: PlaybackSession | undefined;
   let onAudioStarted: () => void = () => {};
@@ -45,6 +48,7 @@ export function playYandexTrack(
     if (stopped) return;
     inner = spawn(mpvPath, buildMpvUrlArgs(playback, options));
     void inner.audioStarted?.then(onAudioStarted);
+    void inner.playbackConfirmed?.then(resolveConfirmed);
     await inner.finished;
   })();
 
@@ -55,5 +59,6 @@ export function playYandexTrack(
       inner?.stop();
     },
     audioStarted,
+    playbackConfirmed,
   };
 }

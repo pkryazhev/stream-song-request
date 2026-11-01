@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 import { TokenStore } from '../core/tokenStore.ts';
 
 interface CachedAppToken {
@@ -15,7 +16,7 @@ let cachedAppToken: CachedAppToken | undefined;
 export async function getSpotifyAppToken(
   clientId: string,
   clientSecret: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<string> {
   if (cachedAppToken && cachedAppToken.expiresAt - 60_000 > Date.now()) {
     return cachedAppToken.accessToken;
@@ -53,7 +54,7 @@ export interface SpotifyUserAuthConfig {
  * воспроизведением на устройстве пользователя (play/pause/queue).
  * Получается один раз через scripts/spotify-auth.ts.
  */
-export function createSpotifyUserTokenStore(cfg: SpotifyUserAuthConfig, fetchImpl: typeof fetch = fetch): TokenStore {
+export function createSpotifyUserTokenStore(cfg: SpotifyUserAuthConfig, fetchImpl: typeof fetch = timedFetch): TokenStore {
   return new TokenStore(cfg.tokenFilePath, async (refreshToken) => {
     const res = await fetchImpl('https://accounts.spotify.com/api/token', {
       method: 'POST',

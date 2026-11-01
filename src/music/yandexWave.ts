@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 import { logger } from '../core/logger.ts';
 import { parseYandexPlayUri } from './yandexMusicProvider.ts';
 import { yandexTrackToDefaultTrack, type YandexTrackEntryJson } from './yandexPlaylist.ts';
@@ -50,7 +51,7 @@ export class YandexWave implements DefaultTrackStream {
   /** Из какой порции трек (playUri → batchId) — для обратной связи. */
   private batchOf = new Map<string, string>();
 
-  constructor(token: string, fetchImpl: typeof fetch = fetch) {
+  constructor(token: string, fetchImpl: typeof fetch = timedFetch) {
     this.token = token;
     this.fetchImpl = fetchImpl;
   }
