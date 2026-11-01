@@ -157,7 +157,7 @@ test('фолловер младше порога (1 день < 3 дней) по�
 test('невалидная ссылка (не youtube/spotify) — отказ с понятным текстом', async () => {
   const { replies, unsubscribe } = collectReplies();
   try {
-    await handleChatMessage(makeMsg({ text: '!sr включи битлз' }), baseCfg, fakeFetchFactory({ followedDaysAgo: 10 }));
+    await handleChatMessage(makeMsg({ text: '!sr https://example.com/song' }), baseCfg, fakeFetchFactory({ followedDaysAgo: 10 }));
     assert.match(replies[0], /ссылка невалидная/);
     assert.equal(peekNextPending(), undefined);
   } finally {
@@ -396,7 +396,7 @@ test('текстовый запрос трека — нет совпадений
       baseCfg,
       fakeFetchFactory({ followedDaysAgo: 10, spotifySearchItems: [] }),
     );
-    assert.match(replies[0], /ссылка невалидная.*название трека для поиска в Spotify/s);
+    assert.match(replies[0], /не удалось найти трек/s);
   } finally {
     unsubscribe();
   }

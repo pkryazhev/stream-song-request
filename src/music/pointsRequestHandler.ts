@@ -1,7 +1,7 @@
 import { timedFetch } from './playbackPolicy.ts';
 import { eventBus } from '../core/eventBus.ts';
 import { logger } from '../core/logger.ts';
-import { processSongRequest, describeLinkSources, type RequestHandlerConfig, type SongRequestOutcome } from './requestHandler.ts';
+import { processSongRequest, describeLinkSources, describeTextSearch, type RequestHandlerConfig, type SongRequestOutcome } from './requestHandler.ts';
 import type { RewardRedeemedEvent } from '../core/events.ts';
 import type { RedemptionStatus } from '../integrations/twitch/channelPointsApi.ts';
 
@@ -69,7 +69,7 @@ export async function handleRedemption(
       redemption.userInput,
       cfg.request,
       {
-        emptyArgHint: `укажи ссылку на ${describeLinkSources(cfg.request, 'или')} в тексте награды "${redemption.rewardTitle}"`,
+        emptyArgHint: `укажи ссылку на ${describeLinkSources(cfg.request, 'или')} в тексте награды "${redemption.rewardTitle}"${describeTextSearch(cfg.request)}`,
         requireFollower: false,
       },
       fetchImpl,

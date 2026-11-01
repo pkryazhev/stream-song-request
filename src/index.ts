@@ -70,11 +70,10 @@ const requestCfg: RequestHandlerConfig = {
   minFollowerDays: config.chat.minFollowerDays,
   maxYoutubeDurationSec: config.youtube.maxDurationSec,
   youtubeApiKey: config.youtube.apiKey,
-  // SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET/SPOTIFY_DEFAULT_PLAYLIST_URI
-  // необязательны (см. config.ts) — если Spotify не настроен, заказы
-  // принимаются только по YouTube-ссылкам.
+  // Ссылки принимаются независимо от источника фоновой музыки.
   spotify: config.spotify ? { clientId: config.spotify.clientId, clientSecret: config.spotify.clientSecret } : undefined,
   yandex: config.yandexMusic ?? undefined,
+  textSearchProvider: config.yandexMusic?.defaultPlaylist ? 'yandex' : config.spotify?.defaultPlaylistUri ? 'spotify' : undefined,
   twitchClientId: config.twitch.clientId,
   twitchBroadcasterId: config.chat.broadcasterId,
   getTwitchAccessToken: () => twitchUserTokens.getValidAccessToken(),

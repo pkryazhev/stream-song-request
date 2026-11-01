@@ -15,6 +15,11 @@ const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com'
 // music.yandex.ru и региональные зеркала (.com, .by, .kz, .uz)
 const YANDEX_MUSIC_HOST_RE = /^music\.yandex\.(ru|com|by|kz|uz)$/;
 
+/** URL, URI или адрес без схемы не должен превращаться в поисковый запрос. */
+export function looksLikeRequestLink(raw: string): boolean {
+  return /(?:[a-z][a-z\d+.-]*:\s*\/|\b[a-z][a-z\d+.-]*:\S|www\.|(?:[\p{L}\d-]+\.)+[\p{L}]{2,}(?=[/:?#\s]|$))/iu.test(raw);
+}
+
 // YouTube video id — ровно 11 символов из этого набора. Ссылки, especially
 // присланные через чат, иногда приходят с "хвостом" из невидимых юникод-
 // символов (комбинирующие диакритики, zero-width-символы и т.п. — например

@@ -17,6 +17,25 @@ import { logger } from '../core/logger.ts';
 
 const API_BASE = 'https://api.music.yandex.net';
 
+/** Первый трек из выдачи Яндекса; исправление опечаток включено. */
+export async function searchYandexTrackByText(
+  query: string,
+  token: string,
+  fetchImpl: typeof fetch = timedFetch,
+): Promise<string | null> {
+  if (!query.trim()) return null;
+  const url = new URL(`${API_BASE}/search`);
+  url.searchParams.set('text', query.trim());
+  url.searchParams.set('type', 'track');
+  url.searchParams.set('nocorrect', 'false');
+  url.searchParams.set('page', '0');
+  const res = await fetchImpl(url, { headers: authHeaders(token) });
+  if (!res.ok) throw new Error(`Яндекс Музыка: поиск вернул HTTP ${res.status}`);
+  const data = await res.json() as { result?: { tracks?: { results?: Array<{ id: string | number }> } } };
+  const id = data.result?.tracks?.results?.[0]?.id;
+  return id == null ? null : String(id);
+}
+
 /**
  * Соль подписи ссылки на файл. Не секрет — зашита в клиенты Яндекс Музыки и
  * публично известна (см. yandex-music-api), но Яндекс может её сменить.
