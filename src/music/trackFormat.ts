@@ -7,5 +7,5 @@ import type { SongProvider } from '../core/events.ts';
  */
 export function formatTrackTitle(provider: SongProvider, title: string, author: string): string {
   // У YouTube "автор" — это канал, а не исполнитель, поэтому его не показываем.
-  return provider === 'youtube' ? title : `${author} - ${title}`;
+  return provider === 'youtube' || provider === 'vk' ? title : `${author} - ${title}`;
 }

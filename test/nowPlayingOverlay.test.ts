@@ -9,6 +9,17 @@ import type { NowPlayingInfo } from '../src/music/playbackOrchestrator.ts';
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
 
+test('resolveCoverUrl: VK uses metadata thumbnail and configured yt-dlp executable', async () => {
+  const deps = { spotifyApp: null, yandexToken: undefined, vkYtdlpPath: 'custom-yt-dlp',
+    getVkThumbnail: async (url: string, executable?: string) => {
+      assert.equal(url, 'https://vkvideo.ru/video-1_2');
+      assert.equal(executable, 'custom-yt-dlp');
+      return 'https://sun9-1.userapi.com/cover.jpg';
+    } };
+  assert.equal(await resolveCoverUrl('https://vkvideo.ru/video-1_2?t=100', deps), 'https://sun9-1.userapi.com/cover.jpg');
+  assert.equal(await resolveCoverUrl('https://vkvideo.ru/video-1_2', { ...deps, getVkThumbnail: async () => null }), null);
+});
+
 test('resolveCoverUrl: YouTube — maxresdefault, если есть, иначе mqdefault (без запросов к API)', async () => {
   const requested: string[] = [];
   const fetchWith = (maxresOk: boolean) =>

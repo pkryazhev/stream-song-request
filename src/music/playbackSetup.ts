@@ -13,6 +13,8 @@ import {
   type YoutubePlaybackOptions,
 } from './youtubePlayer.ts';
 import { playYandexTrack } from './yandexPlayer.ts';
+import { VK_EXTRACTOR, VK_MATCH_FILTER, VK_PLUGIN_DIR } from './vkProvider.ts';
+import { parseRequestLink } from './linkParser.ts';
 import { parseYandexPlayUri, resolveYandexPlayback } from './yandexMusicProvider.ts';
 import { fetchYandexPlaylistTracks } from './yandexPlaylist.ts';
 import { YandexWave } from './yandexWave.ts';
@@ -43,9 +45,18 @@ export function createSpotifyController(): SpotifyPlaybackController | null {
 
 /**
  * Всё, что не Spotify, играет mpv: заказы Яндекс Музыки хранятся в очереди
- * как yandex:track:<id>, остальное — ссылки на YouTube.
+ * как yandex:track:<id>, остальные заказы — ссылки на YouTube или ВК Видео.
  */
 export function createMpvPlayer(): YoutubePlayerLike {
+  const isVk = (url: string): boolean => parseRequestLink(url).type === 'vk';
+  const optionsFor = (url: string): YoutubePlaybackOptions => isVk(url) ? {
+    allowedExtractors: VK_EXTRACTOR,
+    matchFilter: VK_MATCH_FILTER,
+    pluginDirs: VK_PLUGIN_DIR,
+    ytdlPath: config.vk?.ytdlPath ?? config.youtube.ytdlPath,
+    volume: config.youtube.volume,
+    audioDevice: config.youtube.audioDevice,
+  } : youtubeOptions();
   const youtubeOptions = (): YoutubePlaybackOptions => ({
     playerClient: config.youtube.playerClient,
     cookiesFromBrowser: config.youtube.cookiesFromBrowser,
@@ -73,8 +84,8 @@ export function createMpvPlayer(): YoutubePlayerLike {
       if (parseYandexPlayUri(url) !== null) return;
       if (preload?.url === url) return;
       preload?.preload.cancel();
-      logger.info('playback', `Заранее разбираю следующий YouTube-трек: ${url}`);
-      preload = { url, createdAt: Date.now(), preload: preloadYoutubeInfo(url, youtubeOptions()) };
+      logger.info('playback', `Заранее разбираю следующее видео: ${url}`);
+      preload = { url, createdAt: Date.now(), preload: preloadYoutubeInfo(url, optionsFor(url)) };
     },
     play: (url) => {
       const preloaded = takePreload(url);
@@ -94,7 +105,7 @@ export function createMpvPlayer(): YoutubePlayerLike {
           audioDevice: config.youtube.audioDevice,
         }), 2, 1000), config.playback.yandexStartupMs);
       }
-      return boundStartup(playYoutubeUrl(url, config.mpvPath, youtubeOptions(), preloaded), config.playback.youtubeStartupMs);
+      return boundStartup(playYoutubeUrl(url, config.mpvPath, optionsFor(url), preloaded), isVk(url) ? config.playback.vkStartupMs : config.playback.youtubeStartupMs);
     },
   };
 }

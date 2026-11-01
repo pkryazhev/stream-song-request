@@ -1,7 +1,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { eventBus } from '../src/core/eventBus.ts';
-import { handleChatMessage, registerMusicRequestHandler, type RequestHandlerConfig } from '../src/music/requestHandler.ts';
+import { handleChatMessage, registerMusicRequestHandler, processSongRequest, type RequestHandlerConfig } from '../src/music/requestHandler.ts';
 import { initDb } from '../src/db/index.ts';
 import { peekNextPending } from '../src/db/musicQueue.ts';
 import { resetSpotifyAppTokenCache } from '../src/music/spotifyAuth.ts';
@@ -21,6 +21,34 @@ const baseCfg: RequestHandlerConfig = {
 
 /** Тот же cfg, но без Spotify — для тестов режима "только YouTube" (см. #3). */
 const noSpotifyCfg: RequestHandlerConfig = { ...baseCfg, spotify: undefined };
+
+test('VK queues with redemption and enforces its own configurable duration limit', async () => {
+  const requester = { userId: 'vk-user', login: 'viewer', displayName: 'Viewer', isBroadcaster: true,
+    redemption: { redemptionId: 'vk-red', rewardId: 'reward', rewardTitle: 'Music', userId: 'vk-user', userLogin: 'viewer', userName: 'Viewer', userInput: 'url' } };
+  const cfg: RequestHandlerConfig = { ...baseCfg, vk: { maxDurationSec: 120 },
+    fetchVkDetails: async () => ({ title: 'VK Song', author: 'Channel', durationSec: 121 }) };
+  const options = { requireFollower: false, emptyArgHint: '' };
+  const rejected = await processSongRequest(requester, 'https://vkvideo.ru/video-1_2', cfg, options);
+  assert.equal(rejected.queued, false);
+  assert.match(rejected.replyText, /120/);
+  assert.equal(peekNextPending(), undefined);
+  cfg.vk!.maxDurationSec = 121;
+  const accepted = await processSongRequest(requester, 'https://vkvideo.ru/video-1_2', cfg, options);
+  assert.equal(accepted.provider, 'vk');
+  assert.equal(accepted.queued, true);
+  assert.equal(peekNextPending()?.externalId, '-1_2');
+  assert.equal(peekNextPending()?.redemption?.redemptionId, 'vk-red');
+});
+
+test('VK disabled and extraction errors never queue requests', async () => {
+  const requester = { userId: 'vk-user', login: 'viewer', displayName: 'Viewer', isBroadcaster: true };
+  const options = { requireFollower: false, emptyArgHint: '' };
+  for (const cfg of [baseCfg, { ...baseCfg, vk: { maxDurationSec: 600 }, fetchVkDetails: async () => { throw new Error('внешнее видео'); } }]) {
+    const result = await processSongRequest(requester, 'https://vk.com/video1_2', cfg, options);
+    assert.equal(result.queued, false);
+    assert.equal(peekNextPending(), undefined);
+  }
+});
 
 function makeMsg(overrides: Partial<ChatMessageEvent> = {}): ChatMessageEvent {
   return {
