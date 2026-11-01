@@ -1,11 +1,11 @@
 import { timedFetch } from './playbackPolicy.ts';
 import { eventBus } from '../core/eventBus.ts';
 import { logger } from '../core/logger.ts';
-import { parseRequestLink } from './linkParser.ts';
+import { parseRequestLink, looksLikeRequestLink } from './linkParser.ts';
 import { fetchYoutubeVideoDetails } from './youtubeProvider.ts';
 import { fetchSpotifyTrackDetails, type SpotifyTrackDetails } from './spotifyProvider.ts';
 import { searchSpotifyTrackByText } from './spotifySearch.ts';
-import { fetchYandexTrackDetails, fetchYandexFullDownloadInfo, yandexPlayUri } from './yandexMusicProvider.ts';
+import { fetchYandexTrackDetails, fetchYandexFullDownloadInfo, yandexPlayUri, searchYandexTrackByText } from './yandexMusicProvider.ts';
 import { checkFollowerEligibility } from '../integrations/twitch/followerCheck.ts';
 import { enqueueSongRequest } from '../db/musicQueue.ts';
 import { formatTrackTitle } from './trackFormat.ts';
@@ -28,6 +28,8 @@ export interface RequestHandlerConfig {
   spotify?: SpotifyRequestConfig;
   /** undefined — Яндекс Музыка не настроена (нет YANDEX_MUSIC_TOKEN), ссылки на неё отклоняются. */
   yandex?: { token: string };
+  /** Источник фоновой музыки; без него поиск возможен только при одном сервисе. */
+  textSearchProvider?: 'spotify' | 'yandex';
   twitchClientId: string;
   twitchBroadcasterId: string;
   getTwitchAccessToken: () => Promise<string>;
@@ -56,6 +58,17 @@ export function describeLinkSources(
   if (cfg.yandex) sources.push('Яндекс Музыку');
   const last = sources.pop()!;
   return sources.length ? `${sources.join(', ')} ${conjunction} ${last}` : last;
+}
+
+function searchProvider(cfg: RequestHandlerConfig): 'spotify' | 'yandex' | undefined {
+  return cfg.textSearchProvider ?? (cfg.spotify && !cfg.yandex ? 'spotify' : cfg.yandex && !cfg.spotify ? 'yandex' : undefined);
+}
+
+export function describeTextSearch(cfg: RequestHandlerConfig): string {
+  const provider = searchProvider(cfg);
+  return provider && cfg[provider]
+    ? `, либо название трека для поиска в ${provider === 'spotify' ? 'Spotify' : 'Яндекс Музыке'}`
+    : '';
 }
 
 /** Кто заказывает трек — общее для заказа командой и за баллы канала. */
@@ -119,7 +132,7 @@ export async function handleChatMessage(
     msg,
     rest.join(' '),
     cfg,
-    { emptyArgHint: `укажи ссылку: ${cfg.commandName} <ссылка на ${describeLinkSources(cfg, 'или')}>`, requireFollower: true },
+    { emptyArgHint: `укажи ссылку: ${cfg.commandName} <ссылка на ${describeLinkSources(cfg, 'или')}>${describeTextSearch(cfg)}`, requireFollower: true },
     fetchImpl,
   );
   reply(outcome.replyText);
@@ -193,21 +206,28 @@ export async function processSongRequest(
     return handleYandexRequest(parsed.trackId, requester, mention, cfg.yandex.token, fetchImpl);
   }
 
-  // parsed.type === 'invalid' — это необязательно ошибка: если Spotify
-  // настроен, это может быть текстовый запрос ("название трека" или
-  // "исполнитель - название") вместо ссылки — заказываем первый результат
-  // поиска в Spotify (см. spotifySearch.ts), прежде чем окончательно отказать.
-  if (cfg.spotify) {
+  if (looksLikeRequestLink(arg)) {
+    logger.info('music', `Заказ отклонён: неподдерживаемая или некорректная ссылка: ${arg}`);
+    return rejected(`ссылка невалидная — принимаются ссылки на ${describeLinkSources(cfg, 'и')}`);
+  }
+
+  const provider = searchProvider(cfg);
+  if (!provider || !cfg[provider]) {
+    logger.info('music', 'Текстовый заказ отклонён: сервис поиска не выбран или не настроен');
+    return rejected(`ссылка невалидная — принимаются ссылки на ${describeLinkSources(cfg, 'и')}`);
+  }
+  if (provider === 'yandex' && cfg.yandex) {
+    const trackId = await searchYandexTrackByText(arg, cfg.yandex.token, fetchImpl);
+    if (trackId) return handleYandexRequest(trackId, requester, mention, cfg.yandex.token, fetchImpl);
+  } else if (provider === 'spotify' && cfg.spotify) {
     const matched = await searchSpotifyTrackByText(arg, cfg.spotify.clientId, cfg.spotify.clientSecret, fetchImpl);
     if (matched) {
       return enqueueSpotifyTrack(matched, requester, mention);
     }
   }
 
-  return rejected(
-    `ссылка невалидная — принимаются ссылки на ${describeLinkSources(cfg, 'и')}` +
-      (cfg.spotify ? ', либо название трека для поиска в Spotify' : ''),
-  );
+  logger.info('music', `Текстовый заказ отклонён: provider=${provider ?? 'не выбран'}, query=${arg}`);
+  return rejected('не удалось найти трек, попробуй другое название или отправь ссылку');
 }
 
 async function handleYoutubeRequest(
@@ -297,11 +317,14 @@ async function handleYandexRequest(
 ): Promise<SongRequestOutcome> {
   const details = await fetchYandexTrackDetails(trackId, token, fetchImpl);
   if (!details) {
+    logger.info('music', `Яндекс: трек ${trackId} не найден`);
     return { queued: false, replyText: `${mention} ссылка невалидная — трек не найден` };
   }
   // Проверяем сразу, а не при воспроизведении: иначе зритель получит
   // "трек добавлен", а когда до него дойдёт очередь, заказ молча пропустится.
-  if (!details.available || !(await fetchYandexFullDownloadInfo(trackId, token, fetchImpl))) {
+  const hasFullAudio = details.available && Boolean(await fetchYandexFullDownloadInfo(trackId, token, fetchImpl));
+  if (!hasFullAudio) {
+    logger.info('music', `Яндекс: трек ${trackId} отклонён: ${details.available ? 'нет полного mp3 (только превью или неподдерживаемый формат)' : 'available=false'}`);
     return { queued: false, replyText: `${mention} этот трек Яндекс Музыки недоступен для прослушивания` };
   }
 
