@@ -70,6 +70,7 @@ const requestCfg: RequestHandlerConfig = {
   minFollowerDays: config.chat.minFollowerDays,
   maxYoutubeDurationSec: config.youtube.maxDurationSec,
   youtubeApiKey: config.youtube.apiKey,
+  vk: config.vk,
   // Ссылки принимаются независимо от источника фоновой музыки.
   spotify: config.spotify ? { clientId: config.spotify.clientId, clientSecret: config.spotify.clientSecret } : undefined,
   yandex: config.yandexMusic ?? undefined,
@@ -184,6 +185,7 @@ const overlayServer = config.overlay
       spotifyApp: config.spotify ? { clientId: config.spotify.clientId, clientSecret: config.spotify.clientSecret } : null,
       getSpotifyPlayback: spotifyController ? () => spotifyController.getCurrentPlayback() : null,
       yandexToken: config.yandexMusic?.token,
+      vkYtdlpPath: config.youtube.ytdlPath,
     })
   : null;
 

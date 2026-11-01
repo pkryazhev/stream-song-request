@@ -24,6 +24,19 @@ const requestCfg: RequestHandlerConfig = {
   getTwitchAccessToken: async () => 'mod-token',
 };
 
+test('VK points request waits for playback; unavailable video refunds immediately', async () => {
+  for (const available of [true, false]) {
+    const { cfg, statuses } = makeCfg();
+    cfg.request = { ...requestCfg, vk: { maxDurationSec: 600 }, fetchVkDetails: async () => {
+      if (!available) throw new Error('Видео недоступно');
+      return { title: 'VK', author: 'Channel', durationSec: 180 };
+    } };
+    await handleRedemption(makeRedemption({ userInput: 'https://vkvideo.ru/video-1_2' }), cfg);
+    assert.deepEqual(statuses, available ? [] : [{ id: 'red-1', status: 'CANCELED' }]);
+    if (available) assert.equal(peekNextPending()?.redemption?.redemptionId, 'red-1');
+  }
+});
+
 function makeRedemption(overrides: Partial<RewardRedeemedEvent> = {}): RewardRedeemedEvent {
   return {
     redemptionId: 'red-1',

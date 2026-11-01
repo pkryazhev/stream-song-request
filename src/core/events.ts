@@ -19,7 +19,7 @@ export interface ChatReplyEvent {
   text: string;
 }
 
-export type SongProvider = 'spotify' | 'youtube' | 'yandex';
+export type SongProvider = 'spotify' | 'youtube' | 'yandex' | 'vk';
 
 /** Трек успешно поставлен в очередь заказов. */
 export interface SongQueuedEvent {

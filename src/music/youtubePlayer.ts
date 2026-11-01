@@ -141,6 +141,10 @@ function killProcess(child: ReturnType<typeof spawn>): void {
 }
 
 export interface YoutubePlaybackOptions {
+  /** Ограничить обработчики и игнорировать пользовательский конфиг yt-dlp. */
+  allowedExtractors?: string;
+  matchFilter?: string;
+  pluginDirs?: string;
   /**
    * Какого "клиента" YouTube изображает yt-dlp при запросе видео — например
    * "tv" или "android_vr". YouTube в 2025 постепенно требует т.н. PO Token
@@ -255,6 +259,9 @@ export function buildYtdlpInfoArgs(videoUrl: string, options: YoutubePlaybackOpt
 /** Как yt-dlp заходит на YouTube: клиент, куки, IPv4 — общее для разбора и скачивания. */
 function buildYtdlpAccessArgs(options: YoutubePlaybackOptions): string[] {
   const args: string[] = ['--socket-timeout', '10'];
+  if (options.allowedExtractors) args.push('--ignore-config', '--ies', options.allowedExtractors);
+  if (options.matchFilter) args.push('--match-filter', options.matchFilter);
+  if (options.pluginDirs) args.push('--plugin-dirs', options.pluginDirs, '--encoding', 'utf-8');
   if (options.playerClient) {
     args.push('--extractor-args', `youtube:player_client=${options.playerClient}`);
   }
