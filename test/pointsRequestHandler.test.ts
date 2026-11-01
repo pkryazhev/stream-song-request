@@ -93,12 +93,13 @@ beforeEach(() => {
   setRequestsPaused(false);
 });
 
-test('валидный заказ за баллы — трек в очереди, активация выполнена (FULFILLED)', async () => {
+test('валидный YouTube-заказ ожидает подтверждения воспроизведения', async () => {
   const { replies, unsubscribe } = collectReplies();
   const { cfg, statuses } = makeCfg();
   try {
     await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.deepEqual(statuses, []);
+    assert.equal(peekNextPending()?.redemption?.redemptionId, 'red-1');
     assert.equal(peekNextPending()?.title, 'Cool video');
     assert.equal(peekNextPending()?.requestedById, 'viewer-1');
     assert.equal(replies.length, 1);
@@ -119,7 +120,8 @@ test('фолловинг за баллы не требуется — прове�
   }) as typeof fetch;
   try {
     await handleRedemption(makeRedemption(), cfg, fetchImpl);
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.deepEqual(statuses, []);
+    assert.equal(peekNextPending()?.redemption?.redemptionId, 'red-1');
     assert.equal(peekNextPending()?.requestedById, 'viewer-1');
     assert.match(replies[0], /трек добавлен в очередь/);
   } finally {
@@ -210,12 +212,13 @@ test('Privilege-режим: заказ модератора/VIP встаёт в 
   }
 });
 
-test('Privilege-режим: обычный зритель платит как раньше (FULFILLED)', async () => {
+test('Privilege-режим: обычный зритель ожидает подтверждения воспроизведения', async () => {
   const { replies, unsubscribe } = collectReplies();
   const { cfg, statuses } = makeCfg({ isPrivileged: async () => false });
   try {
     await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.deepEqual(statuses, []);
+    assert.equal(peekNextPending()?.redemption?.redemptionId, 'red-1');
     assert.match(replies[0], /трек добавлен в очередь/);
   } finally {
     unsubscribe();
@@ -242,7 +245,7 @@ test('Privilege-режим: стример бесплатно без запро�
   }
 });
 
-test('Privilege-режим: роль узнать не удалось — заказ платный (FULFILLED), трек в очереди', async () => {
+test('Privilege-режим: роль узнать не удалось — заказ платный, подтверждение отложено', async () => {
   const { unsubscribe } = collectReplies();
   const { cfg, statuses } = makeCfg({
     isPrivileged: async () => {
@@ -251,14 +254,15 @@ test('Privilege-режим: роль узнать не удалось — зак
   });
   try {
     await handleRedemption(makeRedemption(), cfg, fakeFetch({ followedDaysAgo: 10, youtubeDurationIso: 'PT3M0S' }));
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.deepEqual(statuses, []);
+    assert.equal(peekNextPending()?.redemption?.redemptionId, 'red-1');
     assert.ok(peekNextPending());
   } finally {
     unsubscribe();
   }
 });
 
-test('Privilege-режим: отказ модератору — роль не проверяется, CANCELED как обычно', async () => {
+test('Privilege-режим: ошибка проверки роли не мешает отклонить невалидный заказ', async () => {
   const { replies, unsubscribe } = collectReplies();
   const { cfg, statuses } = makeCfg({
     isPrivileged: async () => {
@@ -292,7 +296,8 @@ test('registerPointsRequestHandler подключает обработчик к 
   try {
     eventBus.emit('channel_points.redeemed', makeRedemption());
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+    assert.deepEqual(statuses, []);
+    assert.equal(peekNextPending()?.redemption?.redemptionId, 'red-1');
   } finally {
     unregister();
     unsubscribe();
@@ -320,4 +325,27 @@ test('режим баллов: команда !sr ничего не заказы
   } finally {
     unsubscribe();
   }
+});
+
+
+test('Spotify is fulfilled immediately when queued, without waiting for playback', async () => {
+  const { cfg, statuses } = makeCfg();
+  cfg.request = { ...requestCfg, spotify: { clientId: 'id', clientSecret: 'secret' } };
+  const fetchImpl = (async (input: string | URL) => {
+    if (String(input).includes('/api/token')) return Response.json({ access_token: 'token', expires_in: 3600 });
+    return Response.json({ id: '1234567890123456789012', uri: 'spotify:track:1234567890123456789012', name: 'Song', artists: [{ name: 'Artist' }], duration_ms: 180000 });
+  }) as typeof fetch;
+  await handleRedemption(makeRedemption({ userInput: 'https://open.spotify.com/track/1234567890123456789012' }), cfg, fetchImpl);
+  assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }]);
+});
+
+test('settlement events update the matching Twitch redemption', async () => {
+  const { cfg, statuses } = makeCfg();
+  const unregister = registerPointsRequestHandler(cfg);
+  try {
+    eventBus.emit('song.request_settled', { redemption: makeRedemption(), confirmed: true });
+    eventBus.emit('song.request_settled', { redemption: makeRedemption({ redemptionId: 'red-2' }), confirmed: false });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(statuses, [{ id: 'red-1', status: 'FULFILLED' }, { id: 'red-2', status: 'CANCELED' }]);
+  } finally { unregister(); }
 });

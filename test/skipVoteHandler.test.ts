@@ -16,6 +16,20 @@ const cfg = {
 /** Даёт асинхронной обработке !skip (запрос числа зрителей) завершиться. */
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
+test('locked skip is silent for broadcaster and viewers and does not record votes', async () => {
+  const orchestrator = new FakeOrchestrator();
+  const { tracker, unregister } = registerSkipVoteHandler(Object.assign(orchestrator, { canSkip: () => false }), cfg);
+  const { replies, unsubscribe } = collectReplies();
+  try {
+    eventBus.emit('chat.message', makeMsg({ isBroadcaster: true }));
+    eventBus.emit('chat.message', makeMsg());
+    await flush();
+    assert.equal(orchestrator.skipCalls, 0);
+    assert.equal(tracker.voteCount, 0);
+    assert.deepEqual(replies, []);
+  } finally { unregister(); unsubscribe(); }
+});
+
 class FakeOrchestrator implements SkipableOrchestrator {
   mode: 'default' | 'request' = 'request';
   skipCalls = 0;

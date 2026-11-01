@@ -1,3 +1,4 @@
+import { boundStartup, timedFetch } from './playbackPolicy.ts';
 import { config } from '../core/config.ts';
 import { logger } from '../core/logger.ts';
 import { createSpotifyUserTokenStore } from './spotifyAuth.ts';
@@ -6,6 +7,7 @@ import { SPOTIFY_TOP_TRACKS } from './spotifyPlaylistUri.ts';
 import { loadSpotifyTopMix } from './spotifyTopMix.ts';
 import {
   playYoutubeUrl,
+  withRetryBeforeAudio,
   preloadYoutubeInfo,
   type YoutubeInfoPreload,
   type YoutubePlaybackOptions,
@@ -36,7 +38,7 @@ export function createSpotifyController(): SpotifyPlaybackController | null {
       `Нет сохранённого Spotify-токена (${config.spotify.tokenFilePath}). Запусти "npm run auth:spotify" перед первым стартом.`,
     );
   }
-  return new SpotifyPlaybackController(spotifyUserTokens, fetch, config.spotify.deviceName);
+  return new SpotifyPlaybackController(spotifyUserTokens, timedFetch, config.spotify.deviceName);
 }
 
 /**
@@ -87,12 +89,12 @@ export function createMpvPlayer(): YoutubePlayerLike {
           };
         }
         const targetLufs = config.yandexMusic?.loudnessTargetLufs ?? null;
-        return playYandexTrack(() => resolveYandexPlayback(yandexTrackId, token, targetLufs), config.mpvPath, {
+        return boundStartup(withRetryBeforeAudio(() => playYandexTrack(() => resolveYandexPlayback(yandexTrackId, token, targetLufs), config.mpvPath, {
           volume: config.youtube.volume,
           audioDevice: config.youtube.audioDevice,
-        });
+        }), 2, 1000), config.playback.yandexStartupMs);
       }
-      return playYoutubeUrl(url, config.mpvPath, youtubeOptions(), preloaded);
+      return boundStartup(playYoutubeUrl(url, config.mpvPath, youtubeOptions(), preloaded), config.playback.youtubeStartupMs);
     },
   };
 }

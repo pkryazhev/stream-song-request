@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 import { eventBus } from '../core/eventBus.ts';
 import { logger } from '../core/logger.ts';
 import { parseRequestLink } from './linkParser.ts';
@@ -63,6 +64,7 @@ export interface SongRequester {
   login: string;
   displayName: string;
   isBroadcaster: boolean;
+  redemption?: import('../core/events.ts').RewardRedeemedEvent;
 }
 
 export interface SongRequestOptions {
@@ -75,6 +77,7 @@ export interface SongRequestOptions {
 export interface SongRequestOutcome {
   /** true — трек поставлен в очередь. */
   queued: boolean;
+  provider?: import('../core/events.ts').SongProvider;
   /** Готовый ответ в чат (с упоминанием зрителя). */
   replyText: string;
 }
@@ -84,7 +87,7 @@ function reply(text: string): void {
 }
 
 /** Подписывает обработчик заказов на входящие сообщения чата. */
-export function registerMusicRequestHandler(cfg: RequestHandlerConfig, fetchImpl: typeof fetch = fetch): void {
+export function registerMusicRequestHandler(cfg: RequestHandlerConfig, fetchImpl: typeof fetch = timedFetch): void {
   eventBus.on('chat.message', (msg) => {
     void handleChatMessage(msg, cfg, fetchImpl).catch((err) => {
       logger.error('music', 'Ошибка обработки заказа музыки', err);
@@ -101,7 +104,7 @@ export function registerMusicRequestHandler(cfg: RequestHandlerConfig, fetchImpl
 export async function handleChatMessage(
   msg: ChatMessageEvent,
   cfg: RequestHandlerConfig,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<void> {
   const text = msg.text.trim();
   const [cmd, ...rest] = text.split(/\s+/);
@@ -134,7 +137,7 @@ export async function processSongRequest(
   rawArg: string,
   cfg: RequestHandlerConfig,
   options: SongRequestOptions,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<SongRequestOutcome> {
   const mention = `@${requester.displayName}`;
   const rejected = (text: string): SongRequestOutcome => ({ queued: false, replyText: `${mention} ${text}` });
@@ -233,6 +236,7 @@ async function handleYoutubeRequest(
     title: details.title,
     author: details.channelTitle,
     durationSec: details.durationSec,
+    redemption: requester.redemption,
     requestedById: requester.userId,
     requestedByLogin: requester.login,
   });
@@ -240,6 +244,7 @@ async function handleYoutubeRequest(
   eventBus.emit('song.queued', { title: details.title, provider: 'youtube', position });
   return {
     queued: true,
+    provider: 'youtube',
     replyText: `${mention} трек добавлен в очередь: "${formatTrackTitle('youtube', details.title, details.channelTitle)}" (позиция ${position})`,
   };
 }
@@ -267,6 +272,7 @@ function enqueueSpotifyTrack(details: SpotifyTrackDetails, requester: SongReques
     title: details.title,
     author: details.artist,
     durationSec: Math.round(details.durationMs / 1000),
+    redemption: requester.redemption,
     requestedById: requester.userId,
     requestedByLogin: requester.login,
   });
@@ -277,6 +283,7 @@ function enqueueSpotifyTrack(details: SpotifyTrackDetails, requester: SongReques
   // всегда понятно, о каком именно треке речь (мало ли каверов/ремиксов).
   return {
     queued: true,
+    provider: 'spotify',
     replyText: `${mention} трек добавлен в очередь: "${formatTrackTitle('spotify', details.title, details.artist)}" (позиция ${position})`,
   };
 }
@@ -305,6 +312,7 @@ async function handleYandexRequest(
     title: details.title,
     author: details.artist,
     durationSec: details.durationSec,
+    redemption: requester.redemption,
     requestedById: requester.userId,
     requestedByLogin: requester.login,
   });
@@ -312,6 +320,7 @@ async function handleYandexRequest(
   eventBus.emit('song.queued', { title: details.title, provider: 'yandex', position });
   return {
     queued: true,
+    provider: 'yandex',
     replyText: `${mention} трек добавлен в очередь: "${formatTrackTitle('yandex', details.title, details.artist)}" (позиция ${position})`,
   };
 }

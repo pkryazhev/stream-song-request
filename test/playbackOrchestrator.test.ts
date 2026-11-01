@@ -189,6 +189,7 @@ function setup(
     spotify?: FakeSpotify | null;
     noPlaylist?: boolean;
     reimportRetryMs?: number;
+    skipDelaySec?: number;
   } = {},
 ) {
   const mpv = new FakeMpv();
@@ -206,6 +207,7 @@ function setup(
     pollIntervalMs: 5,
     shuffleDefaultPlaylist: false,
     reimportRetryMs: opts.reimportRetryMs ?? 50,
+    skipDelaySec: opts.skipDelaySec,
   });
   const done = orchestrator.start();
   return { mpv, requests, defaults, spotify, orchestrator, done, loads: () => loads };
@@ -579,7 +581,7 @@ test('getNowPlaying: заказ — с логином заказчика; starte
 test('getNowPlaying: трек дефолтного плейлиста Spotify — без заказчика, startedAt сразу', async () => {
   const { orchestrator, done } = setup({ spotify: new FakeSpotify(), playlist: [def(1, 'spotify')] });
   try {
-    await until(() => orchestrator.getNowPlaying() !== null, 'дефолтный трек');
+    await until(() => orchestrator.getNowPlaying()?.startedAt != null, 'дефолтный трек');
     const np = orchestrator.getNowPlaying()!;
     assert.equal(np.kind, 'default');
     assert.equal(np.provider, 'spotify');
@@ -595,11 +597,11 @@ test('getNowPlaying при переходе Spotify → Spotify через оч�
   const spotify = new FakeSpotify();
   const { orchestrator, done } = setup({ spotify, playlist: [def(1, 'spotify'), def(2, 'spotify')] });
   try {
-    await until(() => orchestrator.getNowPlaying()?.playUri === 'spotify:track:d1', 'первый трек');
+    await until(() => orchestrator.getNowPlaying()?.playUri === 'spotify:track:d1' && orchestrator.getNowPlaying()?.startedAt != null, 'первый трек');
     const first = orchestrator.getNowPlaying()!;
     assert.notEqual(first.startedAt, null);
     await until(() => spotify.calls.includes('queue spotify:track:d2'), 'второй трек в очереди Spotify');
-    await until(() => orchestrator.getNowPlaying()?.playUri === 'spotify:track:d2', 'второй трек заиграл');
+    await until(() => orchestrator.getNowPlaying()?.playUri === 'spotify:track:d2' && orchestrator.getNowPlaying()?.startedAt != null, 'второй трек заиграл');
     const second = orchestrator.getNowPlaying()!;
     assert.equal(second.kind, 'default');
     assert.notEqual(second.startedAt, null);
@@ -709,4 +711,58 @@ test('Моя волна: пустая порция — ошибка загруз
     orchestrator.stop();
     await done;
   }
+});
+
+
+test('paid mpv request settles once on confirmation, or refunds on failure before confirmation', async () => {
+  for (const confirmed of [true, false]) {
+    let finish!: () => void;
+    let confirm!: () => void;
+    const requests = new FakeRequests();
+    requests.add('youtube', 'https://youtube.com/test');
+    requests.peekNextPending()!.redemption = {
+      redemptionId: 'red', rewardId: 'reward', rewardTitle: 'Music', userId: 'viewer',
+      userLogin: 'viewer', userName: 'Viewer', userInput: 'test',
+    };
+    const results: boolean[] = [];
+    const listener = (e: { confirmed: boolean }) => { results.push(e.confirmed); };
+    eventBus.on('song.request_settled', listener);
+    const orchestrator = new PlaybackOrchestrator(null, { play: () => ({
+      finished: new Promise<void>((resolve) => { finish = resolve; }),
+      playbackConfirmed: new Promise<void>((resolve) => { confirm = resolve; }), stop: () => finish(),
+    }) }, requests, new FakeDefaults(), null, { pollIntervalMs: 5, shuffleDefaultPlaylist: false });
+    const done = orchestrator.start();
+    try {
+      await until(() => !!finish, 'session');
+      assert.deepEqual(results, []);
+      if (confirmed) { confirm(); await until(() => results.length === 1, 'confirmed'); }
+      finish();
+      await until(() => requests.statuses()[0].endsWith(':done'), 'done');
+      confirm();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(results, [confirmed]);
+    } finally { orchestrator.stop(); await done; eventBus.off('song.request_settled', listener); }
+  }
+});
+
+test('skip delay starts at audio start, applies to default tracks, and does not block stop', async () => {
+  let startAudio!: () => void;
+  let finish!: () => void;
+  const orchestrator = new PlaybackOrchestrator(null, { play: () => ({
+    finished: new Promise<void>((resolve) => { finish = resolve; }),
+    audioStarted: new Promise<void>((resolve) => { startAudio = resolve; }), stop: () => finish(),
+  }) }, new FakeRequests(), new FakeDefaults(), async () => [def(1)], {
+    pollIntervalMs: 5, shuffleDefaultPlaylist: false, skipDelaySec: 0.03,
+  });
+  const done = orchestrator.start();
+  try {
+    await until(() => !!startAudio, 'session');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(orchestrator.skipDefaultPlaylist(), false);
+    startAudio();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(orchestrator.skipDefaultPlaylist(), false);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(orchestrator.canSkip(), true);
+  } finally { orchestrator.stop(); await done; }
 });

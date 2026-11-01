@@ -104,6 +104,8 @@ test('buildYtdlpAudioArgs: без опций — только формат/вы�
     '--abort-on-unavailable-fragments',
     '-o',
     '-',
+    '--socket-timeout',
+    '10',
     'https://youtu.be/xyz',
   ]);
 });
@@ -118,6 +120,8 @@ test('buildYtdlpInfoArgs: только разбор в JSON, с теми же к
   assert.deepEqual(buildYtdlpInfoArgs('https://youtu.be/xyz', { playerClient: 'tv', forceIpv4: true }), [
     '--dump-json',
     '--no-playlist',
+    '--socket-timeout',
+    '10',
     '--extractor-args',
     'youtube:player_client=tv',
     '--force-ipv4',
@@ -190,7 +194,7 @@ test('buildAudioDeviceArg: с audioDevice — "--audio-device=<значение>
 });
 
 test('buildMpvStdinArgs: без опций — кэш, --no-video и "-" (чтение из stdin)', () => {
-  assert.deepEqual(buildMpvStdinArgs({}), ['--cache=yes', '--demuxer-max-bytes=200MiB', '--no-video', '-']);
+  assert.deepEqual(buildMpvStdinArgs({}), ['--cache=yes', '--demuxer-max-bytes=200MiB', '--no-video', '--term-status-msg=SC_PROGRESS:${=time-pos}', '-']);
 });
 
 test('buildMpvStdinArgs: volume/audioDevice добавляются перед кэшем, --no-video и "-"', () => {
@@ -200,6 +204,7 @@ test('buildMpvStdinArgs: volume/audioDevice добавляются перед к
     '--cache=yes',
     '--demuxer-max-bytes=200MiB',
     '--no-video',
+    '--term-status-msg=SC_PROGRESS:${=time-pos}',
     '-',
   ]);
 });

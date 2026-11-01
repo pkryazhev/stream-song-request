@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 import { logger } from '../core/logger.ts';
 import { yandexPlayUri } from './yandexMusicProvider.ts';
 import type { NewDefaultTrack } from '../db/defaultTracks.ts';
@@ -77,7 +78,7 @@ export function yandexTrackToDefaultTrack(t: YandexTrackEntryJson): NewDefaultTr
 export async function fetchYandexPlaylistTracks(
   ref: YandexPlaylistRef,
   token: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<NewDefaultTrack[]> {
   const res = await fetchImpl(playlistApiUrl(ref), { headers: { Authorization: `OAuth ${token}` } });
   if (!res.ok) {

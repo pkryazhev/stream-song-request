@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 import { createHash } from 'node:crypto';
 import { logger } from '../core/logger.ts';
 
@@ -92,7 +93,7 @@ function authHeaders(token: string | undefined): Record<string, string> {
 export async function fetchYandexTrackDetails(
   trackId: string,
   token: string | undefined,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<YandexTrackDetails | null> {
   const res = await fetchImpl(`${API_BASE}/tracks/${encodeURIComponent(trackId)}`, { headers: authHeaders(token) });
   if (res.status === 404 || res.status === 400) return null;
@@ -125,7 +126,7 @@ export async function fetchYandexTrackDetails(
 export async function fetchYandexFullDownloadInfo(
   trackId: string,
   token: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<DownloadInfoJson | null> {
   const res = await fetchImpl(`${API_BASE}/tracks/${encodeURIComponent(trackId)}/download-info`, {
     headers: authHeaders(token),
@@ -159,7 +160,7 @@ export function buildYandexDirectUrl(info: { host: string; path: string; ts: str
 export async function resolveYandexStreamUrl(
   trackId: string,
   token: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<string> {
   const download = await fetchYandexFullDownloadInfo(trackId, token, fetchImpl);
   if (!download) {
@@ -192,7 +193,7 @@ export async function resolveYandexPlayback(
   trackId: string,
   token: string,
   targetLufs: number | null,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<YandexPlayback> {
   const [streamUrl, details] = await Promise.all([
     resolveYandexStreamUrl(trackId, token, fetchImpl),

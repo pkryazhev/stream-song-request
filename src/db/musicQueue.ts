@@ -2,6 +2,7 @@ import { getDb } from './index.ts';
 import type { SongProvider } from '../core/events.ts';
 
 export interface NewSongRequest {
+  redemption?: import('../core/events.ts').RewardRedeemedEvent;
   provider: SongProvider;
   externalId: string;
   /** Что именно передавать в плеер: spotify:track:... для Spotify либо URL для mpv/YouTube. */
@@ -21,6 +22,7 @@ export interface QueuedSongRequest extends NewSongRequest {
 
 interface SongRequestRow {
   id: number;
+  redemption_json: string | null;
   provider: string;
   external_id: string;
   play_uri: string;
@@ -36,6 +38,7 @@ interface SongRequestRow {
 function rowToRequest(row: SongRequestRow): QueuedSongRequest {
   return {
     id: row.id,
+    redemption: row.redemption_json ? JSON.parse(row.redemption_json) : undefined,
     provider: row.provider as SongProvider,
     externalId: row.external_id,
     playUri: row.play_uri,
@@ -64,8 +67,8 @@ export function enqueueSongRequest(track: NewSongRequest): { id: number; positio
   const info = db
     .prepare(
       `INSERT INTO song_requests
-         (provider, external_id, play_uri, title, author, duration_sec, requested_by_id, requested_by_login, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+         (provider, external_id, play_uri, title, author, duration_sec, requested_by_id, requested_by_login, status, created_at, redemption_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     )
     .run(
       track.provider,
@@ -77,6 +80,7 @@ export function enqueueSongRequest(track: NewSongRequest): { id: number; positio
       track.requestedById,
       track.requestedByLogin,
       new Date().toISOString(),
+      track.redemption ? JSON.stringify(track.redemption) : null,
     );
   return { id: Number(info.lastInsertRowid), position: positionBefore + 1 };
 }

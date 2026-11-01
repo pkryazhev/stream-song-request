@@ -15,7 +15,7 @@ export interface SpotifyPlaybackLike extends SpotifyPlayerApi {
 /** Плеер mpv: YouTube-ссылки и yandex:track:<id> (см. index.ts). */
 export interface YoutubePlayerLike {
   /** audioStarted — см. PlaybackSession.audioStarted в youtubePlayer.ts. */
-  play(url: string): { finished: Promise<void>; stop: () => void; audioStarted?: Promise<void> };
+  play(url: string): { finished: Promise<void>; stop: () => void; audioStarted?: Promise<void>; playbackConfirmed?: Promise<void> };
   /**
    * Подсказка: этот трек, скорее всего, заиграет следующим — можно заранее
    * подготовиться (см. preloadYoutubeInfo). Если следующим заиграет другое,
@@ -61,6 +61,8 @@ export interface DefaultTrackStream {
 export interface OrchestratorConfig {
   /** Как часто опрашивать Spotify, пока играет его трек, и как долго "спать", когда играть нечего, мс. */
   pollIntervalMs: number;
+  skipDelaySec?: number;
+  spotifyStartupMs?: number;
   /** Перемешивать ли дефолтный плейлист при каждой загрузке в таблицу. */
   shuffleDefaultPlaylist: boolean;
   /** Не чаще какого интервала пытаться заново загрузить плейлист после неудачи, мс. */
@@ -234,7 +236,13 @@ export class PlaybackOrchestrator {
   }
 
   /** Скип текущего заказа. false — сейчас играет не заказ. */
+  canSkip(): boolean {
+    const delay = (this.cfg.skipDelaySec ?? 0) * 1000;
+    return !!this.current && (delay === 0 || (this.current.startedAt !== null && Date.now() - this.current.startedAt >= delay));
+  }
+
   skip(): boolean {
+    if (!this.canSkip()) return false;
     if (this.current?.item.kind !== 'request' || !this.current.stop) return false;
     this.current.stop();
     return true;
@@ -242,6 +250,7 @@ export class PlaybackOrchestrator {
 
   /** Скип текущего трека дефолтного плейлиста (он удаляется из таблицы, как проигранный). */
   skipDefaultPlaylist(): boolean {
+    if (!this.canSkip()) return false;
     if (this.current?.item.kind !== 'default' || !this.current.stop) return false;
     this.current.skipped = true;
     this.current.stop();
@@ -418,6 +427,14 @@ export class PlaybackOrchestrator {
       this.prefetchStreamBatch();
     }
 
+    let settled = false;
+    const settle = (confirmed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (item.kind === 'request' && track.provider !== 'spotify' && item.track.redemption) {
+        eventBus.emit('song.request_settled', { redemption: item.track.redemption, confirmed });
+      }
+    };
     let ok = true;
     let prepareTimer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -428,15 +445,19 @@ export class PlaybackOrchestrator {
         session = playSpotifyTrack(this.spotify, track.playUri, {
           pollIntervalMs: this.cfg.pollIntervalMs,
           queued,
+          startupTimeoutMs: this.cfg.spotifyStartupMs,
+          onStarted: () => { if (this.current === current && !this.stopped) current.startedAt = Date.now(); },
           prepareNext: () => this.queueNextSpotifyTrack(item),
           expected: { title: track.title, artist: track.author },
         });
-        current.startedAt = Date.now();
       } else {
         await this.silenceSpotify();
         const mpvSession = this.mpv.play(track.playUri);
         void mpvSession.audioStarted?.then(() => {
-          current.startedAt = Date.now();
+          if (this.current === current && !this.stopped) current.startedAt = Date.now();
+        });
+        void mpvSession.playbackConfirmed?.then(() => {
+          if (this.current === current && !this.stopped) settle(true);
         });
         session = mpvSession;
         // У mpv нет prepareNext, как у плеера Spotify, — следующий трек
@@ -456,6 +477,7 @@ export class PlaybackOrchestrator {
       ok = false;
       logger.error('playback', `Ошибка воспроизведения "${track.title}" — перехожу к следующему треку`, err);
     }
+    settle(false);
     clearTimeout(prepareTimer);
 
     const halted = this.haltRequested;

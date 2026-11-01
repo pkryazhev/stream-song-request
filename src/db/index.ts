@@ -47,6 +47,8 @@ export function initDb(path: string): void {
       value TEXT NOT NULL
     );
   `);
+  const columns = db.prepare('PRAGMA table_info(song_requests)').all() as { name: string }[];
+  if (!columns.some((c) => c.name === 'redemption_json')) db.exec('ALTER TABLE song_requests ADD COLUMN redemption_json TEXT');
 }
 
 /** Доступ к общему инстансу БД для остальных модулей (db/musicQueue.ts и т.п.). */

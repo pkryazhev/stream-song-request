@@ -215,13 +215,13 @@ test('Яндекс Музыка не настроена — ссылка отк�
 test('buildMpvUrlArgs: громкость, устройство, поправка громкости, без видео, ссылка последней', () => {
   assert.deepEqual(
     buildMpvUrlArgs({ streamUrl: 'https://x/y.mp3', gainDb: -2.6 }, { volume: 40, audioDevice: 'wasapi/abc' }),
-    ['--volume=40', '--audio-device=wasapi/abc', '--af=lavfi=[volume=-2.6dB]', '--no-video', 'https://x/y.mp3'],
+    ['--volume=40', '--audio-device=wasapi/abc', '--af=lavfi=[volume=-2.6dB]', '--no-video', '--term-status-msg=SC_PROGRESS:${=time-pos}', 'https://x/y.mp3'],
   );
 });
 
 test('buildMpvUrlArgs: нет поправки (или она нулевая) — фильтр не добавляется', () => {
-  assert.deepEqual(buildMpvUrlArgs({ streamUrl: 'https://x/y.mp3' }, {}), ['--no-video', 'https://x/y.mp3']);
-  assert.deepEqual(buildMpvUrlArgs({ streamUrl: 'https://x/y.mp3', gainDb: 0 }, {}), ['--no-video', 'https://x/y.mp3']);
+  assert.deepEqual(buildMpvUrlArgs({ streamUrl: 'https://x/y.mp3' }, {}), ['--no-video', '--term-status-msg=SC_PROGRESS:${=time-pos}', 'https://x/y.mp3']);
+  assert.deepEqual(buildMpvUrlArgs({ streamUrl: 'https://x/y.mp3', gainDb: 0 }, {}), ['--no-video', '--term-status-msg=SC_PROGRESS:${=time-pos}', 'https://x/y.mp3']);
 });
 
 test('playYandexTrack запускает mpv с полученной ссылкой и ждёт его завершения', async () => {
@@ -231,7 +231,7 @@ test('playYandexTrack запускает mpv с полученной ссылк�
     return { finished: Promise.resolve(), stop: () => {} };
   });
   await session.finished;
-  assert.deepEqual(spawned, [['mpv', '--no-video', 'https://x/y.mp3']]);
+  assert.deepEqual(spawned, [['mpv', '--no-video', '--term-status-msg=SC_PROGRESS:${=time-pos}', 'https://x/y.mp3']]);
 });
 
 test('playYandexTrack: скип до того, как ссылка получена — mpv не запускается', async () => {

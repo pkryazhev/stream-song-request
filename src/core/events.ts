@@ -64,6 +64,7 @@ export interface RewardRedeemedEvent {
  * события — остальной код не меняется.
  */
 export interface AppEvents {
+  'song.request_settled': { redemption: RewardRedeemedEvent; confirmed: boolean };
   'chat.message': ChatMessageEvent;
   'chat.reply': ChatReplyEvent;
   'song.queued': SongQueuedEvent;

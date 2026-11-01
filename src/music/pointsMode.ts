@@ -1,3 +1,4 @@
+import { timedFetch } from './playbackPolicy.ts';
 import { eventBus } from '../core/eventBus.ts';
 import { logger } from '../core/logger.ts';
 import { getSetting, setSetting } from '../db/settings.ts';
@@ -48,7 +49,7 @@ export interface PointsModeHandle {
  *     задним числом уже нельзя, а без этого баллы зрителей пропали бы;
  *  4. подписывается на новые активации через EventSub.
  */
-export async function startPointsRequestMode(cfg: PointsModeConfig, fetchImpl: typeof fetch = fetch): Promise<PointsModeHandle> {
+export async function startPointsRequestMode(cfg: PointsModeConfig, fetchImpl: typeof fetch = timedFetch): Promise<PointsModeHandle> {
   const token = await getTokenInfo(await cfg.api.getAccessToken(), fetchImpl);
   if (token.userId !== cfg.api.broadcasterId) {
     throw new Error(
@@ -154,7 +155,7 @@ export async function startPointsRequestMode(cfg: PointsModeConfig, fetchImpl: t
 export async function disablePointsReward(
   api: ChannelPointsApiConfig,
   rewardTitle: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = timedFetch,
 ): Promise<string | null> {
   const reward = await findManageableReward(api, { id: getSetting(REWARD_ID_SETTING), title: rewardTitle }, fetchImpl);
   if (!reward) return null;

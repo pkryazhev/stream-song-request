@@ -150,6 +150,8 @@ const orchestrator = new PlaybackOrchestrator(
   {
     pollIntervalMs: config.playback.pollIntervalMs,
     shuffleDefaultPlaylist: config.playback.shuffleDefaultPlaylist,
+    skipDelaySec: config.chat.skipDelaySec,
+    spotifyStartupMs: config.playback.spotifyStartupMs,
   },
 );
 void orchestrator.start();
