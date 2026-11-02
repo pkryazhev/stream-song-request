@@ -168,6 +168,10 @@ const youtubeEnabled = checkMusicSource(
   ['YOUTUBE_API_KEY'],
   'заказы по ссылкам на YouTube отключены.',
 );
+const vkEnabledRaw = (process.env.VK_VIDEO_ENABLED ?? 'false').trim().toLowerCase();
+if (!['true', 'false'].includes(vkEnabledRaw)) throw new Error('VK_VIDEO_ENABLED должен быть true или false');
+const vkEnabled = vkEnabledRaw === 'true';
+if (vkEnabled) logger.info('config', 'ВК Видео: включено без авторизации');
 // С дефолтным плейлистом из Яндекса Spotify нужен только для Spotify-заказов,
 // и SPOTIFY_DEFAULT_PLAYLIST_URI не требуется (задавать его нельзя, см. выше).
 const spotifyEnabled = checkMusicSource(
@@ -182,10 +186,10 @@ const yandexEnabled = checkMusicSource(
   ['YANDEX_MUSIC_TOKEN'],
   'заказы по ссылкам на Яндекс Музыку отключены.',
 );
-if (!youtubeEnabled && !spotifyEnabled && !yandexEnabled) {
+if (!youtubeEnabled && !spotifyEnabled && !yandexEnabled && !vkEnabled) {
   logger.error(
     'config',
-    'Не настроен ни один источник заказов музыки (YouTube, Spotify, Яндекс Музыка) — см. предупреждения выше. ' +
+    'Не настроен ни один источник заказов музыки (YouTube, ВК Видео, Spotify, Яндекс Музыка) — см. предупреждения выше. ' +
       'Заполни переменные хотя бы для одного из них в .env (см. .env.example). Приложение завершает работу.',
   );
   process.exit(1);
@@ -284,10 +288,15 @@ export const config = {
       process.env.MUSIC_REWARD_PROMPT ||
       `Ссылка на ${[
         ...(youtubeEnabled ? ['YouTube'] : []),
+        ...(vkEnabled ? ['ВК Видео'] : []),
         ...(spotify ? ['Spotify'] : []),
         ...(yandexMusicToken ? ['Яндекс Музыку'] : []),
       ].join(', ')}${spotify ? ', либо название трека' : ''}. Если заказ не пройдёт — баллы вернутся.`,
   },
+  vk: vkEnabled ? {
+    maxDurationSec: seconds('VK_VIDEO_MAX_DURATION_SEC', 600, 1),
+    ytdlPath: process.env.YTDLP_PATH || undefined,
+  } : undefined,
   youtube: {
     // undefined — YOUTUBE_API_KEY не задан, заказы по ссылкам на YouTube
     // отклоняются (воспроизведение через mpv при этом нужно Яндекс Музыке).
@@ -324,6 +333,7 @@ export const config = {
     : null,
   // Параметры цикла оркестратора воспроизведения (см. playbackOrchestrator.ts).
   playback: {
+    vkStartupMs: seconds('VK_VIDEO_STARTUP_TIMEOUT_SEC', 60, 1) * 1000,
     youtubeStartupMs: seconds('YOUTUBE_STARTUP_TIMEOUT_SEC', 60, 1) * 1000,
     yandexStartupMs: seconds('YANDEX_STARTUP_TIMEOUT_SEC', 30, 1) * 1000,
     spotifyStartupMs: seconds('SPOTIFY_STARTUP_TIMEOUT_SEC', 30, 1) * 1000,

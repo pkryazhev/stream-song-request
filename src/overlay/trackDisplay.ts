@@ -34,5 +34,5 @@ export function cleanYoutubeTitle(videoTitle: string, channelTitle: string): Tra
 }
 
 export function toTrackDisplay(provider: SongProvider, title: string, author: string): TrackDisplay {
-  return provider === 'youtube' ? cleanYoutubeTitle(title, author) : { title, artist: author };
+  return provider === 'youtube' || provider === 'vk' ? cleanYoutubeTitle(title, author) : { title, artist: author };
 }

@@ -715,11 +715,12 @@ test('Моя волна: пустая порция — ошибка загруз
 
 
 test('paid mpv request settles once on confirmation, or refunds on failure before confirmation', async () => {
-  for (const confirmed of [true, false]) {
+  for (const provider of ['youtube', 'vk'] as const) for (const confirmed of [true, false]) {
     let finish!: () => void;
+    let fail!: (error: Error) => void;
     let confirm!: () => void;
     const requests = new FakeRequests();
-    requests.add('youtube', 'https://youtube.com/test');
+    requests.add(provider, provider === 'vk' ? 'https://vk.com/video1_2' : 'https://youtube.com/test');
     requests.peekNextPending()!.redemption = {
       redemptionId: 'red', rewardId: 'reward', rewardTitle: 'Music', userId: 'viewer',
       userLogin: 'viewer', userName: 'Viewer', userInput: 'test',
@@ -728,7 +729,7 @@ test('paid mpv request settles once on confirmation, or refunds on failure befor
     const listener = (e: { confirmed: boolean }) => { results.push(e.confirmed); };
     eventBus.on('song.request_settled', listener);
     const orchestrator = new PlaybackOrchestrator(null, { play: () => ({
-      finished: new Promise<void>((resolve) => { finish = resolve; }),
+      finished: new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; }),
       playbackConfirmed: new Promise<void>((resolve) => { confirm = resolve; }), stop: () => finish(),
     }) }, requests, new FakeDefaults(), null, { pollIntervalMs: 5, shuffleDefaultPlaylist: false });
     const done = orchestrator.start();
@@ -736,7 +737,7 @@ test('paid mpv request settles once on confirmation, or refunds on failure befor
       await until(() => !!finish, 'session');
       assert.deepEqual(results, []);
       if (confirmed) { confirm(); await until(() => results.length === 1, 'confirmed'); }
-      finish();
+      if (confirmed) finish(); else fail(new Error('stream unavailable'));
       await until(() => requests.statuses()[0].endsWith(':done'), 'done');
       confirm();
       await new Promise((resolve) => setImmediate(resolve));

@@ -7,6 +7,7 @@ import { parseYandexPlayUri } from '../music/yandexMusicProvider.ts';
 import type { NowPlayingInfo } from '../music/playbackOrchestrator.ts';
 import type { SpotifyPlaybackState } from '../music/spotifyProvider.ts';
 import { toTrackDisplay } from './trackDisplay.ts';
+import { fetchVkThumbnail } from '../music/vkProvider.ts';
 
 /**
  * Оверлей "сейчас играет" для OBS (источник "Браузер"): маленький
@@ -32,6 +33,8 @@ export interface OverlayDeps {
   /** Для обложек треков Яндекс Музыки; undefined — Яндекс не настроен. */
   yandexToken: string | undefined;
   fetchImpl?: typeof fetch;
+  vkYtdlpPath?: string;
+  getVkThumbnail?: (url: string, ytdlPath?: string) => Promise<string | null>;
 }
 
 export interface OverlayState {
@@ -71,7 +74,7 @@ const COVER_CACHE_SIZE = 20;
 /** Адрес обложки трека в интернете; null — обложки нет. */
 export async function resolveCoverUrl(
   playUri: string,
-  deps: Pick<OverlayDeps, 'spotifyApp' | 'yandexToken'>,
+  deps: Pick<OverlayDeps, 'spotifyApp' | 'yandexToken' | 'vkYtdlpPath' | 'getVkThumbnail'>,
   fetchImpl: typeof fetch = fetch,
 ): Promise<string | null> {
   const yandexId = parseYandexPlayUri(playUri);
@@ -89,6 +92,9 @@ export async function resolveCoverUrl(
   }
 
   const link = parseRequestLink(playUri);
+  if (link.type === 'vk') {
+    return (deps.getVkThumbnail ?? fetchVkThumbnail)(link.url, deps.vkYtdlpPath);
+  }
   if (link.type === 'spotify') {
     if (!deps.spotifyApp) return null;
     const token = await getSpotifyAppToken(deps.spotifyApp.clientId, deps.spotifyApp.clientSecret, fetchImpl);

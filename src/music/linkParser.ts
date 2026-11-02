@@ -1,16 +1,18 @@
 /**
- * Разбор ссылки из команды `!sr <ссылка>`. Принимаются только YouTube,
- * Spotify и Яндекс Музыка — всё остальное (включая просто текстовый поисковый запрос)
+ * Разбор ссылки из команды `!sr <ссылка>`. Принимаются YouTube, ВК Видео,
+ * Spotify и Яндекс Музыка — всё остальное (включая текстовый поисковый запрос)
  * считается невалидной ссылкой.
  */
 
 export type ParsedRequestLink =
+  | { type: 'vk'; videoId: string; url: string }
   | { type: 'youtube'; videoId: string }
   | { type: 'spotify'; trackId: string }
   | { type: 'yandex'; trackId: string }
   | { type: 'invalid' };
 
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com']);
+const VK_HOSTS = new Set(['vk.com', 'www.vk.com', 'm.vk.com', 'vk.ru', 'www.vk.ru', 'm.vk.ru', 'vkvideo.ru', 'www.vkvideo.ru']);
 
 // music.yandex.ru и региональные зеркала (.com, .by, .kz, .uz)
 const YANDEX_MUSIC_HOST_RE = /^music\.yandex\.(ru|com|by|kz|uz)$/;
@@ -56,6 +58,15 @@ export function parseRequestLink(raw: string): ParsedRequestLink {
   }
 
   const host = url.hostname.toLowerCase();
+
+  if (VK_HOSTS.has(host)) {
+    const match = url.pathname.match(/^\/video(-?\d+_\d+)\/?$/);
+    if (!match || url.username || url.password || url.port) return { type: 'invalid' };
+    const canonical = new URL(`https://${host}/video${match[1]}`);
+    const list = url.searchParams.get('list');
+    if (list && /^[a-zA-Z0-9_-]+$/.test(list)) canonical.searchParams.set('list', list);
+    return { type: 'vk', videoId: match[1], url: canonical.href };
+  }
 
   if (host === 'youtu.be') {
     const videoId = extractYoutubeId(url.pathname.slice(1).split('/')[0]);

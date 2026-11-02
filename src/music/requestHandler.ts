@@ -3,6 +3,7 @@ import { eventBus } from '../core/eventBus.ts';
 import { logger } from '../core/logger.ts';
 import { parseRequestLink, looksLikeRequestLink } from './linkParser.ts';
 import { fetchYoutubeVideoDetails } from './youtubeProvider.ts';
+import { fetchVkVideoDetails, type VkVideoDetails } from './vkProvider.ts';
 import { fetchSpotifyTrackDetails, type SpotifyTrackDetails } from './spotifyProvider.ts';
 import { searchSpotifyTrackByText } from './spotifySearch.ts';
 import { fetchYandexTrackDetails, fetchYandexFullDownloadInfo, yandexPlayUri, searchYandexTrackByText } from './yandexMusicProvider.ts';
@@ -18,6 +19,8 @@ export interface SpotifyRequestConfig {
 }
 
 export interface RequestHandlerConfig {
+  vk?: { maxDurationSec: number; ytdlPath?: string };
+  fetchVkDetails?: (url: string) => Promise<VkVideoDetails>;
   /** Например "!sr". Сравнение регистронезависимое. */
   commandName: string;
   minFollowerDays: number;
@@ -49,11 +52,12 @@ export interface RequestHandlerConfig {
  * всегда, см. config.ts). conjunction — "или" для подсказки, "и" для отказа.
  */
 export function describeLinkSources(
-  cfg: Pick<RequestHandlerConfig, 'youtubeApiKey' | 'spotify' | 'yandex'>,
+  cfg: Pick<RequestHandlerConfig, 'youtubeApiKey' | 'spotify' | 'yandex' | 'vk'>,
   conjunction: 'и' | 'или',
 ): string {
   const sources: string[] = [];
   if (cfg.youtubeApiKey) sources.push('YouTube');
+  if (cfg.vk) sources.push('ВК Видео');
   if (cfg.spotify) sources.push('Spotify');
   if (cfg.yandex) sources.push('Яндекс Музыку');
   const last = sources.pop()!;
@@ -184,6 +188,24 @@ export async function processSongRequest(
   }
 
   const parsed = parseRequestLink(arg);
+
+  if (parsed.type === 'vk') {
+    if (!cfg.vk) return rejected('заказ по ссылке на ВК Видео сейчас недоступен');
+    let details: VkVideoDetails;
+    try {
+      details = await (cfg.fetchVkDetails ?? ((url) => fetchVkVideoDetails(url, cfg.vk)))(parsed.url);
+    } catch (err) {
+      return rejected(err instanceof Error ? err.message : 'не удалось проверить видео ВК');
+    }
+    if (details.durationSec > cfg.vk.maxDurationSec) return rejected(`видео ВК длиннее ${cfg.vk.maxDurationSec} сек.`);
+    const { position } = enqueueSongRequest({
+      provider: 'vk', externalId: parsed.videoId, playUri: parsed.url,
+      ...details, redemption: requester.redemption,
+      requestedById: requester.userId, requestedByLogin: requester.login,
+    });
+    eventBus.emit('song.queued', { title: details.title, provider: 'vk', position });
+    return { queued: true, provider: 'vk', replyText: `${mention} трек добавлен в очередь: "${details.title}" (позиция ${position})` };
+  }
 
   if (parsed.type === 'youtube') {
     if (!cfg.youtubeApiKey) {
