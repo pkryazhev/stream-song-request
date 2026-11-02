@@ -73,7 +73,7 @@ const requestCfg: RequestHandlerConfig = {
   // Ссылки принимаются независимо от источника фоновой музыки.
   spotify: config.spotify ? { clientId: config.spotify.clientId, clientSecret: config.spotify.clientSecret } : undefined,
   yandex: config.yandexMusic ?? undefined,
-  textSearchProvider: config.yandexMusic?.defaultPlaylist ? 'yandex' : config.spotify?.defaultPlaylistUri ? 'spotify' : undefined,
+  textSearchProvider: config.textSearchProvider,
   twitchClientId: config.twitch.clientId,
   twitchBroadcasterId: config.chat.broadcasterId,
   getTwitchAccessToken: () => twitchUserTokens.getValidAccessToken(),

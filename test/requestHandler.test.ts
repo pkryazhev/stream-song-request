@@ -9,6 +9,7 @@ import { setRequestsPaused } from '../src/music/requestsGate.ts';
 import type { ChatMessageEvent } from '../src/core/events.ts';
 
 const baseCfg: RequestHandlerConfig = {
+  textSearchProvider: 'spotify',
   commandName: '!sr',
   minFollowerDays: 3,
   maxYoutubeDurationSec: 600,

@@ -217,7 +217,17 @@ function seconds(name: string, fallback: number, min = 0): number {
   return value;
 }
 
+const textSearchProviderRaw = (process.env.MUSIC_TEXT_SEARCH_PROVIDER ?? 'off').trim().toLowerCase() || 'off';
+if (!['off', 'spotify', 'yandex'].includes(textSearchProviderRaw)) {
+  throw new Error('MUSIC_TEXT_SEARCH_PROVIDER должен быть "off", "spotify" или "yandex".');
+}
+const textSearchProvider = textSearchProviderRaw as 'off' | 'spotify' | 'yandex';
+if ((textSearchProvider === 'spotify' && !spotifyEnabled) || (textSearchProvider === 'yandex' && !yandexEnabled)) {
+  logger.warn('config', `MUSIC_TEXT_SEARCH_PROVIDER=${textSearchProvider}: сервис не настроен — поиск по тексту работать не будет.`);
+}
+
 export const config = {
+  textSearchProvider,
   twitch: {
     clientId: required('TWITCH_CLIENT_ID'),
     clientSecret: required('TWITCH_CLIENT_SECRET'),

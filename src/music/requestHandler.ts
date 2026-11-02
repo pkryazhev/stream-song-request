@@ -28,8 +28,8 @@ export interface RequestHandlerConfig {
   spotify?: SpotifyRequestConfig;
   /** undefined — Яндекс Музыка не настроена (нет YANDEX_MUSIC_TOKEN), ссылки на неё отклоняются. */
   yandex?: { token: string };
-  /** Источник фоновой музыки; без него поиск возможен только при одном сервисе. */
-  textSearchProvider?: 'spotify' | 'yandex';
+  /** Независимый источник текстового поиска; по умолчанию выключен. */
+  textSearchProvider?: 'off' | 'spotify' | 'yandex';
   twitchClientId: string;
   twitchBroadcasterId: string;
   getTwitchAccessToken: () => Promise<string>;
@@ -61,7 +61,7 @@ export function describeLinkSources(
 }
 
 function searchProvider(cfg: RequestHandlerConfig): 'spotify' | 'yandex' | undefined {
-  return cfg.textSearchProvider ?? (cfg.spotify && !cfg.yandex ? 'spotify' : cfg.yandex && !cfg.spotify ? 'yandex' : undefined);
+  return cfg.textSearchProvider === 'off' ? undefined : cfg.textSearchProvider;
 }
 
 export function describeTextSearch(cfg: RequestHandlerConfig): string {
@@ -214,20 +214,41 @@ export async function processSongRequest(
   const provider = searchProvider(cfg);
   if (!provider || !cfg[provider]) {
     logger.info('music', 'Текстовый заказ отклонён: сервис поиска не выбран или не настроен');
-    return rejected(`ссылка невалидная — принимаются ссылки на ${describeLinkSources(cfg, 'и')}`);
+    return rejected('Поиск по тексту не работает. Отправь ссылку');
   }
-  if (provider === 'yandex' && cfg.yandex) {
-    const trackId = await searchYandexTrackByText(arg, cfg.yandex.token, fetchImpl);
-    if (trackId) return handleYandexRequest(trackId, requester, mention, cfg.yandex.token, fetchImpl);
-  } else if (provider === 'spotify' && cfg.spotify) {
-    const matched = await searchSpotifyTrackByText(arg, cfg.spotify.clientId, cfg.spotify.clientSecret, fetchImpl);
-    if (matched) {
-      return enqueueSpotifyTrack(matched, requester, mention);
+  try {
+    if (provider === 'yandex' && cfg.yandex) {
+      const { token } = cfg.yandex;
+      const trackId = await retryTextSearch(() => searchYandexTrackByText(arg, token, fetchImpl));
+      if (trackId) return await handleYandexRequest(trackId, requester, mention, token, fetchImpl);
+    } else if (provider === 'spotify' && cfg.spotify) {
+      const { clientId, clientSecret } = cfg.spotify;
+      const matched = await retryTextSearch(() => searchSpotifyTrackByText(arg, clientId, clientSecret, fetchImpl));
+      if (matched) {
+        return enqueueSpotifyTrack(matched, requester, mention);
+      }
     }
+  } catch (err) {
+    logger.error('music', 'Не удалось заказать трек по тексту', err);
+    return rejected('Не удалось заказать трек по тексту. Попробуй позже или отправь ссылку');
   }
 
   logger.info('music', `Текстовый заказ отклонён: provider=${provider ?? 'не выбран'}, query=${arg}`);
   return rejected('не удалось найти трек, попробуй другое название или отправь ссылку');
+}
+
+/** Повторяем сетевые ошибки и таймауты, но не ответы HTTP с ошибкой. */
+async function retryTextSearch<T>(search: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await search();
+    } catch (err) {
+      const networkError = err instanceof TypeError || (err instanceof Error && ['TimeoutError', 'AbortError'].includes(err.name));
+      if (!networkError || attempt >= 3) throw err;
+      logger.warn('music', `Сетевая ошибка текстового поиска — повтор ${attempt}/2`);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
 }
 
 async function handleYoutubeRequest(

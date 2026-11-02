@@ -71,12 +71,48 @@ test('Spotify выбран при включённых обоих сервиса
   assert.ok(calls.every(url => !url.includes('yandex')));
 });
 
-test('без дефолтного источника: один сервис ищет, два требуют ссылку', async () => {
+test('без выбранного источника поиск выключен даже при одном сервисе', async () => {
   const { fetchImpl } = mockSearch();
   const ambiguous = await processSongRequest(requester, 'Кино группа крови', { ...cfg, textSearchProvider: undefined }, options, fetchImpl);
   assert.equal(ambiguous.queued, false);
   const single = await processSongRequest(requester, 'Кино группа крови', { ...cfg, spotify: undefined, textSearchProvider: undefined }, options, fetchImpl);
-  assert.equal(single.provider, 'yandex');
+  assert.equal(single.queued, false);
+  assert.match(single.replyText, /Поиск по тексту не работает. Отправь ссылку/);
+});
+
+test('off и ненастроенный выбранный сервис не запускают поиск', async () => {
+  for (const overrides of [{ textSearchProvider: 'off' as const }, { yandex: undefined }]) {
+    const result = await processSongRequest(requester, 'Song', { ...cfg, ...overrides }, options,
+      (async () => { throw new Error('Сеть не ожидается'); }) as typeof fetch);
+    assert.equal(result.queued, false);
+    assert.match(result.replyText, /Поиск по тексту не работает/);
+  }
+});
+
+for (const recover of [true, false]) {
+  test(`сетевая ошибка поиска: три попытки, восстановление=${recover}`, async () => {
+    let attempts = 0;
+    const { fetchImpl } = mockSearch();
+    const flakyFetch = (async (input, init) => {
+      if (String(input).includes('/search')) {
+        attempts++;
+        if (!recover || attempts < 3) throw new TypeError('fetch failed');
+      }
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    const result = await processSongRequest(requester, 'Кино группа крови', cfg, options, flakyFetch);
+    assert.equal(attempts, 3);
+    assert.equal(result.queued, recover);
+    if (!recover) assert.match(result.replyText, /Не удалось заказать трек по тексту/);
+  });
+}
+
+test('HTTP-ошибка поиска не повторяется', async () => {
+  const { calls, fetchImpl } = mockSearch('error');
+  const result = await processSongRequest(requester, 'Кино группа крови', cfg, options, fetchImpl);
+  assert.equal(calls.length, 1);
+  assert.equal(result.queued, false);
+  assert.match(result.replyText, /Не удалось заказать трек по тексту/);
 });
 
 test('адреса и повреждённые ссылки не запускают поиск', async () => {

@@ -135,7 +135,7 @@ test('невалидная ссылка — CANCELED', async () => {
   try {
     await handleRedemption(makeRedemption({ userInput: 'включи битлз' }), cfg, fakeFetch({ followedDaysAgo: 10 }));
     assert.deepEqual(statuses, [{ id: 'red-1', status: 'CANCELED' }]);
-    assert.equal(replies[0], '@Viewer1 ссылка невалидная — принимаются ссылки на YouTube');
+    assert.equal(replies[0], '@Viewer1 Поиск по тексту не работает. Отправь ссылку');
   } finally {
     unsubscribe();
   }
@@ -272,7 +272,7 @@ test('Privilege-режим: ошибка проверки роли не меша
   try {
     await handleRedemption(makeRedemption({ userInput: 'включи битлз' }), cfg, fakeFetch({ followedDaysAgo: 10 }));
     assert.deepEqual(statuses, [{ id: 'red-1', status: 'CANCELED' }]);
-    assert.equal(replies[0], '@Viewer1 ссылка невалидная — принимаются ссылки на YouTube');
+    assert.equal(replies[0], '@Viewer1 Поиск по тексту не работает. Отправь ссылку');
   } finally {
     unsubscribe();
   }
