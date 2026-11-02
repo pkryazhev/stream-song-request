@@ -171,7 +171,7 @@ const youtubeEnabled = checkMusicSource(
 const vkEnabledRaw = (process.env.VK_VIDEO_ENABLED ?? 'false').trim().toLowerCase();
 if (!['true', 'false'].includes(vkEnabledRaw)) throw new Error('VK_VIDEO_ENABLED должен быть true или false');
 const vkEnabled = vkEnabledRaw === 'true';
-if (vkEnabled) logger.info('config', 'ВК Видео: включено без авторизации');
+if (vkEnabled) logger.info('config', 'ВК Видео: проверка и воспроизведение без авторизации');
 // С дефолтным плейлистом из Яндекса Spotify нужен только для Spotify-заказов,
 // и SPOTIFY_DEFAULT_PLAYLIST_URI не требуется (задавать его нельзя, см. выше).
 const spotifyEnabled = checkMusicSource(
@@ -222,11 +222,11 @@ function seconds(name: string, fallback: number, min = 0): number {
 }
 
 const textSearchProviderRaw = (process.env.MUSIC_TEXT_SEARCH_PROVIDER ?? 'off').trim().toLowerCase() || 'off';
-if (!['off', 'spotify', 'yandex'].includes(textSearchProviderRaw)) {
-  throw new Error('MUSIC_TEXT_SEARCH_PROVIDER должен быть "off", "spotify" или "yandex".');
+if (!['off', 'spotify', 'yandex', 'vk'].includes(textSearchProviderRaw)) {
+  throw new Error('MUSIC_TEXT_SEARCH_PROVIDER должен быть "off", "spotify", "yandex" или "vk".');
 }
-const textSearchProvider = textSearchProviderRaw as 'off' | 'spotify' | 'yandex';
-if ((textSearchProvider === 'spotify' && !spotifyEnabled) || (textSearchProvider === 'yandex' && !yandexEnabled)) {
+const textSearchProvider = textSearchProviderRaw as 'off' | 'spotify' | 'yandex' | 'vk';
+if ((textSearchProvider === 'spotify' && !spotifyEnabled) || (textSearchProvider === 'yandex' && !yandexEnabled) || (textSearchProvider === 'vk' && !vkEnabled)) {
   logger.warn('config', `MUSIC_TEXT_SEARCH_PROVIDER=${textSearchProvider}: сервис не настроен — поиск по тексту работать не будет.`);
 }
 

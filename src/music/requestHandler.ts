@@ -4,6 +4,7 @@ import { logger } from '../core/logger.ts';
 import { parseRequestLink, looksLikeRequestLink } from './linkParser.ts';
 import { fetchYoutubeVideoDetails } from './youtubeProvider.ts';
 import { fetchVkVideoDetails, type VkVideoDetails } from './vkProvider.ts';
+import { searchVkVideoByText, VkSearchError } from './vkSearch.ts';
 import { fetchSpotifyTrackDetails, type SpotifyTrackDetails } from './spotifyProvider.ts';
 import { searchSpotifyTrackByText } from './spotifySearch.ts';
 import { fetchYandexTrackDetails, fetchYandexFullDownloadInfo, yandexPlayUri, searchYandexTrackByText } from './yandexMusicProvider.ts';
@@ -32,7 +33,7 @@ export interface RequestHandlerConfig {
   /** undefined — Яндекс Музыка не настроена (нет YANDEX_MUSIC_TOKEN), ссылки на неё отклоняются. */
   yandex?: { token: string };
   /** Независимый источник текстового поиска; по умолчанию выключен. */
-  textSearchProvider?: 'off' | 'spotify' | 'yandex';
+  textSearchProvider?: 'off' | 'spotify' | 'yandex' | 'vk';
   twitchClientId: string;
   twitchBroadcasterId: string;
   getTwitchAccessToken: () => Promise<string>;
@@ -64,14 +65,14 @@ export function describeLinkSources(
   return sources.length ? `${sources.join(', ')} ${conjunction} ${last}` : last;
 }
 
-function searchProvider(cfg: RequestHandlerConfig): 'spotify' | 'yandex' | undefined {
+function searchProvider(cfg: RequestHandlerConfig): 'spotify' | 'yandex' | 'vk' | undefined {
   return cfg.textSearchProvider === 'off' ? undefined : cfg.textSearchProvider;
 }
 
 export function describeTextSearch(cfg: RequestHandlerConfig): string {
   const provider = searchProvider(cfg);
   return provider && cfg[provider]
-    ? `, либо название трека для поиска в ${provider === 'spotify' ? 'Spotify' : 'Яндекс Музыке'}`
+    ? `, либо название трека для поиска в ${provider === 'spotify' ? 'Spotify' : provider === 'vk' ? 'ВК Видео' : 'Яндекс Музыке'}`
     : '';
 }
 
@@ -190,21 +191,7 @@ export async function processSongRequest(
   const parsed = parseRequestLink(arg);
 
   if (parsed.type === 'vk') {
-    if (!cfg.vk) return rejected('заказ по ссылке на ВК Видео сейчас недоступен');
-    let details: VkVideoDetails;
-    try {
-      details = await (cfg.fetchVkDetails ?? ((url) => fetchVkVideoDetails(url, cfg.vk)))(parsed.url);
-    } catch (err) {
-      return rejected(err instanceof Error ? err.message : 'не удалось проверить видео ВК');
-    }
-    if (details.durationSec > cfg.vk.maxDurationSec) return rejected(`видео ВК длиннее ${cfg.vk.maxDurationSec} сек.`);
-    const { position } = enqueueSongRequest({
-      provider: 'vk', externalId: parsed.videoId, playUri: parsed.url,
-      ...details, redemption: requester.redemption,
-      requestedById: requester.userId, requestedByLogin: requester.login,
-    });
-    eventBus.emit('song.queued', { title: details.title, provider: 'vk', position });
-    return { queued: true, provider: 'vk', replyText: `${mention} трек добавлен в очередь: "${details.title}" (позиция ${position})` };
+    return handleVkRequest(parsed, requester, cfg);
   }
 
   if (parsed.type === 'youtube') {
@@ -239,7 +226,14 @@ export async function processSongRequest(
     return rejected('Поиск по тексту не работает. Отправь ссылку');
   }
   try {
-    if (provider === 'yandex' && cfg.yandex) {
+    if (provider === 'vk' && cfg.vk) {
+      const url = await retryTextSearch(() => searchVkVideoByText(arg, fetchImpl));
+      if (url) {
+        const video = parseRequestLink(url);
+        if (video.type !== 'vk') throw new VkSearchError(false, 'VK search returned an invalid URL');
+        return await handleVkRequest(video, requester, cfg);
+      }
+    } else if (provider === 'yandex' && cfg.yandex) {
       const { token } = cfg.yandex;
       const trackId = await retryTextSearch(() => searchYandexTrackByText(arg, token, fetchImpl));
       if (trackId) return await handleYandexRequest(trackId, requester, mention, token, fetchImpl);
@@ -251,12 +245,43 @@ export async function processSongRequest(
       }
     }
   } catch (err) {
+    if (provider === 'vk') {
+      // Fetch errors can retain request details; log only our sanitized API errors.
+      logger.warn('music', err instanceof VkSearchError ? err.message : 'Сетевая ошибка поиска ВК');
+      return rejected(err instanceof VkSearchError && err.unavailable
+        ? 'Поиск ВК сейчас недоступен. Отправь ссылку'
+        : 'Не удалось выполнить поиск ВК. Попробуй позже или отправь ссылку');
+    }
     logger.error('music', 'Не удалось заказать трек по тексту', err);
     return rejected('Не удалось заказать трек по тексту. Попробуй позже или отправь ссылку');
   }
 
   logger.info('music', `Текстовый заказ отклонён: provider=${provider ?? 'не выбран'}, query=${arg}`);
   return rejected('не удалось найти трек, попробуй другое название или отправь ссылку');
+}
+
+/** Общая проверка и постановка в очередь для ссылки и текстового поиска ВК. */
+async function handleVkRequest(
+  video: { videoId: string; url: string }, requester: SongRequester, cfg: RequestHandlerConfig,
+): Promise<SongRequestOutcome> {
+  const mention = `@${requester.displayName}`;
+  const rejected = (text: string): SongRequestOutcome => ({ queued: false, replyText: `${mention} ${text}` });
+  if (!cfg.vk) return rejected('заказ по ссылке на ВК Видео сейчас недоступен');
+  let details: VkVideoDetails;
+  try {
+    details = await (cfg.fetchVkDetails ?? ((url) => fetchVkVideoDetails(url, cfg.vk)))(video.url);
+  } catch (err) {
+    return rejected(err instanceof Error ? err.message : 'не удалось проверить видео ВК');
+  }
+  if (isRequestsPaused()) return rejected('заказы музыки сейчас недоступны');
+  if (details.durationSec > cfg.vk.maxDurationSec) return rejected(`видео ВК длиннее ${cfg.vk.maxDurationSec} сек.`);
+  const { position } = enqueueSongRequest({
+    provider: 'vk', externalId: video.videoId, playUri: video.url,
+    ...details, redemption: requester.redemption,
+    requestedById: requester.userId, requestedByLogin: requester.login,
+  });
+  eventBus.emit('song.queued', { title: details.title, provider: 'vk', position });
+  return { queued: true, provider: 'vk', replyText: `${mention} трек добавлен в очередь: "${details.title}" (позиция ${position})` };
 }
 
 /** Повторяем сетевые ошибки и таймауты, но не ответы HTTP с ошибкой. */
