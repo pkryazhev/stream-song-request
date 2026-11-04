@@ -17,6 +17,7 @@ import { VK_EXTRACTOR, VK_MATCH_FILTER, VK_PLUGIN_DIR } from './vkProvider.ts';
 import { parseRequestLink } from './linkParser.ts';
 import { parseYandexPlayUri, resolveYandexPlayback } from './yandexMusicProvider.ts';
 import { fetchYandexPlaylistTracks } from './yandexPlaylist.ts';
+import { fetchYoutubePlaylistTracks } from './youtubePlaylist.ts';
 import { YandexWave } from './yandexWave.ts';
 import type { DefaultPlaylistLoader, DefaultTrackStream, YoutubePlayerLike } from './playbackOrchestrator.ts';
 
@@ -115,12 +116,16 @@ const PRELOAD_MAX_AGE_MS = 30 * 60_000;
 
 /**
  * Откуда брать треки для таблицы дефолтного плейлиста. config.ts гарантирует,
- * что задан не больше чем один плейлист: Spotify (SPOTIFY_DEFAULT_PLAYLIST_URI)
- * или Яндекс Музыка (YANDEX_DEFAULT_PLAYLIST_URL) — плейлист или Моя волна.
+ * что задан не больше чем один источник: YouTube, Spotify или Яндекс
+ * Музыка (плейлист или Моя волна).
  */
 export function createDefaultPlaylistLoader(
   spotifyController: SpotifyPlaybackController | null,
 ): DefaultPlaylistLoader | DefaultTrackStream | null {
+  if (config.youtube.defaultPlaylistId && config.youtube.apiKey) {
+    const { defaultPlaylistId, apiKey } = config.youtube;
+    return () => fetchYoutubePlaylistTracks(defaultPlaylistId, apiKey);
+  }
   const yandex = config.yandexMusic;
   const yandexDefault = yandex?.defaultPlaylist;
   if (yandex && yandexDefault?.kind === 'wave') {
