@@ -8,6 +8,7 @@ import type { NowPlayingInfo } from '../music/playbackOrchestrator.ts';
 import type { SpotifyPlaybackState } from '../music/spotifyProvider.ts';
 import { toTrackDisplay } from './trackDisplay.ts';
 import { fetchVkThumbnail } from '../music/vkProvider.ts';
+import { createControlPanel, type ControlDeps } from './controlPanel.ts';
 
 /**
  * Оверлей "сейчас играет" для OBS (источник "Браузер"): маленький
@@ -24,6 +25,7 @@ import { fetchVkThumbnail } from '../music/vkProvider.ts';
  */
 
 export interface OverlayDeps {
+  control?: ControlDeps;
   port: number;
   getNowPlaying: () => NowPlayingInfo | null;
   /** Для обложек треков Spotify; null — Spotify не настроен. */
@@ -120,6 +122,7 @@ export async function resolveCoverUrl(
 export function startNowPlayingOverlay(deps: OverlayDeps): Server {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const html = readFileSync(new URL('./overlay.html', import.meta.url));
+  const control = deps.control ? createControlPanel(deps.control, currentState) : null;
 
   const covers = new Map<string, Promise<{ type: string; body: Buffer } | null>>();
   let spotifyProgress: { playUri: string; progressMs: number; isPlaying: boolean; fetchedAt: number } | null = null;
@@ -206,6 +209,7 @@ export function startNowPlayingOverlay(deps: OverlayDeps): Server {
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
+    if (control?.(req, res, url.pathname)) return;
     if (url.pathname === '/overlay' || url.pathname === '/overlay/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(html);
@@ -241,6 +245,7 @@ export function startNowPlayingOverlay(deps: OverlayDeps): Server {
   });
   server.listen(deps.port, '127.0.0.1', () => {
     logger.info('overlay', `Оверлей "сейчас играет": http://localhost:${deps.port}/overlay (источник "Браузер" в OBS)`);
+    if (control) logger.info('overlay', `Панель управления: http://127.0.0.1:${deps.port}/control`);
   });
   return server;
 }

@@ -161,6 +161,8 @@ export class PlaybackOrchestrator {
   private stopped = false;
   private running: Promise<void> | undefined;
   private current: CurrentPlayback | null = null;
+  private playbackId = 0;
+  private controlSkipPending = false;
   /** Следующий трек, уже поставленный в очередь Spotify: играет следующим, что бы ни пришло после. */
   private queuedNext: Item | null = null;
   /** true — текущий дефолтный трек остановлен командой !pr: из таблицы его не удаляем. */
@@ -245,6 +247,20 @@ export class PlaybackOrchestrator {
     if (!this.canSkip()) return false;
     if (this.current?.item.kind !== 'request' || !this.current.stop) return false;
     this.current.stop();
+    return true;
+  }
+
+  getControlState(): { playbackId: number; canSkip: boolean } {
+    return { playbackId: this.playbackId, canSkip: !!this.current?.stop && !this.controlSkipPending && !this.stopped };
+  }
+
+  /** Команда владельца локальной панели: без задержки чата, только для указанного запуска. */
+  skipFromControl(playbackId: number): boolean {
+    const current = this.current;
+    if (!current?.stop || playbackId !== this.playbackId || !this.getControlState().canSkip) return false;
+    this.controlSkipPending = true;
+    if (current.item.kind === 'default') current.skipped = true;
+    current.stop();
     return true;
   }
 
@@ -413,6 +429,8 @@ export class PlaybackOrchestrator {
     if (item.kind === 'request') this.requests.markPlaying(item.track.id);
     const current: CurrentPlayback = { item, startedAt: null };
     this.current = current;
+    this.playbackId += 1;
+    this.controlSkipPending = false;
     eventBus.emit('song.now_playing', {
       title: track.title,
       provider: track.provider,

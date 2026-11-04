@@ -19,6 +19,26 @@ beforeEach(() => {
   setRequestsPaused(false);
 });
 
+test('панель скипает заказы и фон без задержки, отклоняет повтор и старый запуск', async () => {
+  const { mpv, requests, defaults, orchestrator, done } = setup({ skipDelaySec: 15 });
+  try {
+    await until(() => orchestrator.getControlState().canSkip, 'готовый фон');
+    const first = orchestrator.getControlState().playbackId;
+    assert.equal(orchestrator.skipDefaultPlaylist(), false);
+    requests.add('youtube', 'https://youtu.be/request');
+    assert.equal(orchestrator.skipFromControl(first), true);
+    assert.equal(orchestrator.skipFromControl(first), false);
+    await until(() => orchestrator.getMode() === 'request' && orchestrator.getControlState().canSkip, 'заказ');
+    assert.equal(defaults.uris().includes('yandex:track:1'), false);
+    assert.equal(orchestrator.skipFromControl(first), false);
+    assert.equal(orchestrator.skip(), false);
+    assert.equal(orchestrator.skipFromControl(orchestrator.getControlState().playbackId), true);
+    await until(() => mpv.played.length === 3, 'следующий фон');
+    assert.ok(requests.statuses()[0].endsWith(':done'));
+  } finally { orchestrator.stop(); await done; }
+  assert.equal(orchestrator.getControlState().canSkip, false);
+});
+
 /** mpv: трек "играет", пока тест не вызовет finish() или его не остановят. */
 class FakeMpv implements YoutubePlayerLike {
   played: string[] = [];

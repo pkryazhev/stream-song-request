@@ -181,6 +181,10 @@ registerRequestsToggleHandler(orchestrator, {
 const overlayServer = config.overlay
   ? startNowPlayingOverlay({
       port: config.overlay.port,
+      control: {
+        getState: () => orchestrator.getControlState(),
+        skip: (id) => orchestrator.skipFromControl(id),
+      },
       getNowPlaying: () => orchestrator.getNowPlaying(),
       spotifyApp: config.spotify ? { clientId: config.spotify.clientId, clientSecret: config.spotify.clientSecret } : null,
       getSpotifyPlayback: spotifyController ? () => spotifyController.getCurrentPlayback() : null,

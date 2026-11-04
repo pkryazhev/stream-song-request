@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Управление музыкой</title>
+<style>
+  :root { color-scheme: dark; font: 13px/1.45 system-ui, sans-serif; background: #1b1c22; color: #f1f1f6; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 10px; }
+  main { max-width: 520px; margin: 0 auto; }
+  .track { padding: 12px; border: 1px solid #383943; border-radius: 10px; background: linear-gradient(125deg, #2c293c, #24252d 75%); }
+  .label { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; color: #b8abcF; font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+  .label svg { width: 12px; height: 12px; flex-shrink: 0; }
+  #title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+  #artist { color: #a7a8b8; margin-top: 4px; font-size: 12px; overflow-wrap: anywhere; }
+  #artist:empty { display: none; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+  button { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 32px; padding: 7px; border: 1px solid #7260aa; border-radius: 7px; background: #59458a; color: #f6f1ff; cursor: pointer; transition: background .15s, border-color .15s; }
+  button svg { width: 18px; height: 18px; }
+  button:hover:not(:disabled) { background: #7056ac; border-color: #a58bd7; }
+  button:active:not(:disabled) { background: #493873; }
+  button:disabled { opacity: .4; cursor: default; }
+  button:focus-visible { outline: 2px solid #c5b0ff; outline-offset: 3px; }
+  #status { margin: 8px 0 0; color: #b7bac8; font-size: 11px; overflow-wrap: anywhere; }
+  #status:empty { display: none; }
+</style>
+<main>
+<section class="track" aria-labelledby="now-playing-label">
+  <div class="label" id="now-playing-label">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 18V5l12-2v13M9 8l12-2"/><ellipse cx="6" cy="18" rx="3" ry="3"/><ellipse cx="18" cy="16" rx="3" ry="3"/></svg>
+    Сейчас играет
+  </div>
+  <h1 id="title">Подключение…</h1>
+  <div id="artist"></div>
+</section>
+<div class="controls" role="group" aria-label="Управление воспроизведением">
+  <button id="skip" type="button" title="Пропустить трек" aria-label="Пропустить трек" disabled>
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 4.8a.8.8 0 0 1 1.24-.67l10 6.4a1.75 1.75 0 0 1 0 2.94l-10 6.4A.8.8 0 0 1 5 19.2Z"/><rect x="18" y="4" width="3" height="16" rx="1"/></svg>
+  </button>
+</div>
+<p id="status" role="status" aria-live="polite"></p>
+</main>
+<script>
+  const token = '__CONTROL_TOKEN__';
+  const title = document.getElementById('title');
+  const artist = document.getElementById('artist');
+  const button = document.getElementById('skip');
+  const status = document.getElementById('status');
+  let state = null;
+  let busy = false;
+  let waitingFor = null;
+  let errorMessage = '';
+  async function read(url) {
+    const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error('Нет связи с ботом');
+    return response.json();
+  }
+  async function refresh() {
+    try {
+      const control = await read('/control/state');
+      const track = control.track;
+      state = control;
+      if (waitingFor !== null && waitingFor !== state.playbackId) waitingFor = null;
+      title.textContent = track.playing ? track.title : 'Ничего не играет';
+      artist.textContent = track.playing ? track.artist : '';
+      button.disabled = busy || waitingFor !== null || !state.canSkip;
+      if (!busy) status.textContent = errorMessage || (waitingFor !== null ? 'Переключаем…' : '');
+    } catch {
+      state = null;
+      button.disabled = true;
+      status.textContent = 'Нет связи с ботом. Проверьте, что он запущен. Если бот перезапускался, обновите панель.';
+    }
+  }
+  button.addEventListener('click', async () => {
+    if (busy || !state?.canSkip) return;
+    busy = true;
+    errorMessage = '';
+    button.disabled = true;
+    const id = state.playbackId;
+    status.textContent = 'Переключаем…';
+    try {
+      const response = await fetch('/control/skip', { method: 'POST', signal: AbortSignal.timeout(5000),
+        headers: { 'X-Control-Token': token, 'X-Playback-Id': String(id) } });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error);
+      waitingFor = id;
+    } catch (error) {
+      errorMessage = error.message || 'Не удалось отправить команду';
+      status.textContent = errorMessage;
+    } finally { busy = false; }
+  });
+  async function poll() { await refresh(); setTimeout(poll, 1000); }
+  poll();
+</script>
+</html>
