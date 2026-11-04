@@ -30,6 +30,8 @@ const scopes = [
   'user-read-playback-state',
   'user-modify-playback-state',
   'user-read-currently-playing',
+  'user-library-read',
+  'user-library-modify',
   'playlist-read-private',
   // для SPOTIFY_DEFAULT_PLAYLIST_URI=TOP (топ-треки вместо плейлиста)
   'user-top-read',

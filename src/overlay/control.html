@@ -31,6 +31,12 @@
   #volume-status:empty { display: none; }
   #status { margin: 8px 0 0; color: #b7bac8; font-size: 11px; overflow-wrap: anywhere; }
   #status:empty { display: none; }
+  [hidden] { display: none !important; }
+  .ratings { display: flex; gap: 6px; }
+  .ratings button { background: #2c2b36; border-color: #46434f; }
+  .ratings button[aria-pressed="true"] { color: #ffd27a; border-color: #d7a659; background: #40352b; }
+  #rating-status { margin: 6px 0 0; color: #b7bac8; font-size: 11px; }
+  #rating-status:empty { display: none; }
 </style>
 <main>
 <section class="track" aria-labelledby="now-playing-label">
@@ -42,6 +48,14 @@
   <div id="artist"></div>
 </section>
 <div class="controls" role="group" aria-label="Управление воспроизведением">
+  <div id="ratings" class="ratings" role="group" aria-label="Оценка трека Яндекс Музыки" hidden>
+    <button id="like" type="button" title="Мне нравится" aria-label="Мне нравится" aria-pressed="false" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M7 10h-4v11h4zm0 0 5-8c3 0 3 3 1 7h6a2 2 0 0 1 2 2l-2 8a3 3 0 0 1-3 2H7Z"/></svg>
+    </button>
+    <button id="dislike" type="button" title="Не рекомендовать" aria-label="Не рекомендовать" aria-pressed="false" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true" transform="rotate(180)"><path d="M7 10h-4v11h4zm0 0 5-8c3 0 3 3 1 7h6a2 2 0 0 1 2 2l-2 8a3 3 0 0 1-3 2H7Z"/></svg>
+    </button>
+  </div>
   <button id="skip" type="button" title="Пропустить трек" aria-label="Пропустить трек" disabled>
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 4.8a.8.8 0 0 1 1.24-.67l10 6.4a1.75 1.75 0 0 1 0 2.94l-10 6.4A.8.8 0 0 1 5 19.2Z"/><rect x="18" y="4" width="3" height="16" rx="1"/></svg>
   </button>
@@ -54,6 +68,7 @@
   </div>
 </div>
 <p id="volume-status" role="status" aria-live="polite"></p>
+<p id="rating-status" role="status" aria-live="polite"></p>
 <p id="status" role="status" aria-live="polite"></p>
 </main>
 <script>
@@ -62,6 +77,50 @@
   const artist = document.getElementById('artist');
   const button = document.getElementById('skip');
   const status = document.getElementById('status');
+  const ratings = document.getElementById('ratings');
+  const like = document.getElementById('like');
+  const dislike = document.getElementById('dislike');
+  const ratingStatus = document.getElementById('rating-status');
+  let ratingSending = false;
+  let ratingMessage = '';
+  function renderRating() {
+    const spotify = state?.track?.provider === 'spotify';
+    const value = spotify ? state?.spotifyRating : state?.yandexRating;
+    ratings.hidden = !['yandex', 'spotify'].includes(state?.track?.provider);
+    ratings.setAttribute('aria-label', spotify ? 'Лайк трека Spotify' : 'Оценка трека Яндекс Музыки');
+    dislike.hidden = spotify;
+    like.disabled = dislike.disabled = ratings.hidden || ratingSending || !value?.ready || value.busy;
+    like.setAttribute('aria-pressed', String(value?.rating === 'like'));
+    dislike.setAttribute('aria-pressed', String(value?.rating === 'dislike'));
+    for (const [node, active, label] of [[like, value?.rating === 'like', 'Мне нравится'], [dislike, value?.rating === 'dislike', 'Не рекомендовать']]) {
+      const text = active ? `Снять отметку «${label}»` : label;
+      node.title = text; node.setAttribute('aria-label', text);
+    }
+    ratingStatus.textContent = ratings.hidden ? '' : ratingMessage || value?.error || (!value?.ready ? 'Загружаем отметки…' : '');
+  }
+  async function rate(rating) {
+    const spotify = state?.track?.provider === 'spotify';
+    const currentRating = spotify ? state?.spotifyRating : state?.yandexRating;
+    if (ratingSending || !currentRating?.ready || currentRating.busy || !['yandex', 'spotify'].includes(state.track.provider) || (spotify && rating === 'dislike')) return;
+    const id = state.playbackId;
+    const value = currentRating.rating === rating ? 'none' : rating;
+    ratingSending = true; ratingMessage = 'Сохраняем отметку…'; renderRating();
+    try {
+      const response = await fetch(spotify ? '/control/spotify-rating' : '/control/yandex-rating', { method: 'POST', signal: AbortSignal.timeout(30000),
+        headers: { 'X-Control-Token': token, 'X-Playback-Id': String(id), 'X-Rating': value } });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error);
+      if (state?.playbackId === id) {
+        const updated = spotify ? state.spotifyRating : state.yandexRating;
+        if (updated) updated.rating = value === 'none' ? null : value;
+        ratingMessage = result.warning || '';
+      }
+    } catch (error) {
+      if (state?.playbackId === id) ratingMessage = error.message || 'Не удалось сохранить отметку';
+    } finally { ratingSending = false; renderRating(); }
+  }
+  like.addEventListener('click', () => rate('like'));
+  dislike.addEventListener('click', () => rate('dislike'));
   const slider = document.getElementById('volume');
   const mute = document.getElementById('mute');
   const volumeValue = document.getElementById('volume-value');
@@ -146,7 +205,9 @@
         volumeRevision++;
         volumeError = '';
       }
+      if (control.playbackId !== state?.playbackId) ratingMessage = '';
       state = control;
+      renderRating();
       slider.disabled = mute.disabled = !control.volume?.supported;
       if (control.volume && (targetChanged || (!volumeDirty && !volumeSending && !wasSending && revision === volumeRevision))) {
         volumeDraft = { level: control.volume.level, muted: control.volume.muted };
@@ -161,6 +222,7 @@
       if (!busy) status.textContent = errorMessage || (waitingFor !== null ? 'Переключаем…' : '');
     } catch {
       state = null;
+      renderRating();
       button.disabled = true;
       slider.disabled = mute.disabled = true;
       status.textContent = 'Нет связи с ботом. Проверьте, что он запущен. Если бот перезапускался, обновите панель.';

@@ -1,10 +1,19 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { YandexRating } from '../music/yandexRatings.ts';
 
 export interface ControlDeps {
   getState: () => { playbackId: number; canSkip: boolean };
   skip: (playbackId: number) => boolean;
+  spotifyRating?: {
+    getState: () => { rating: 'like' | null; ready: boolean; busy: boolean; error: string | null } | null;
+    set: (playbackId: number, rating: 'like' | null) => Promise<{ warning: string | null }>;
+  };
+  yandexRating?: {
+    getState: () => { rating: YandexRating; ready: boolean; busy: boolean; error: string | null } | null;
+    set: (playbackId: number, rating: YandexRating) => Promise<{ warning: string | null }>;
+  };
   volume?: {
     getState: () => { level: number; muted: boolean; supported: boolean; error: string | null; target?: string };
     set: (level: number, muted: boolean, target?: string) => void | Promise<void>;
@@ -15,7 +24,7 @@ export function createControlPanel(deps: ControlDeps, getTrack: () => unknown) {
   const token = randomBytes(32).toString('hex');
   const html = readFileSync(new URL('./control.html', import.meta.url), 'utf8').replace('__CONTROL_TOKEN__', token);
   return (req: IncomingMessage, res: ServerResponse, path: string): boolean => {
-    if (!['/control', '/control/', '/control/state', '/control/skip', '/control/volume'].includes(path)) return false;
+    if (!['/control', '/control/', '/control/state', '/control/skip', '/control/volume', '/control/yandex-rating', '/control/spotify-rating'].includes(path)) return false;
     const reply = (status: number, data: unknown) => {
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(data));
@@ -31,12 +40,30 @@ export function createControlPanel(deps: ControlDeps, getTrack: () => unknown) {
       reply(403, { error: 'Доступ запрещён' });
       return true;
     }
-    if (path === '/control/skip' || path === '/control/volume') {
+    if (path === '/control/skip' || path === '/control/volume' || path === '/control/yandex-rating' || path === '/control/spotify-rating') {
       if (req.method !== 'POST') {
         res.setHeader('Allow', 'POST');
         reply(405, { error: 'Нужен POST' });
       } else if (req.headers['x-control-token'] !== token) {
         reply(403, { error: 'Обновите страницу панели' });
+      } else if (path === '/control/yandex-rating' || path === '/control/spotify-rating') {
+        const spotify = path === '/control/spotify-rating';
+        const handler = spotify ? deps.spotifyRating : deps.yandexRating;
+        const raw = req.headers['x-playback-id'];
+        const id = typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : NaN;
+        const value = req.headers['x-rating'];
+        const ratingState = handler?.getState();
+        if (!Number.isSafeInteger(id) || !(spotify ? ['like', 'none'] : ['like', 'dislike', 'none']).includes(String(value))) {
+          reply(400, { error: 'Некорректная отметка' });
+        } else if (id !== deps.getState().playbackId || !ratingState?.ready || ratingState.busy) {
+          reply(409, { error: ratingState?.error || 'Трек сменился или отметки ещё загружаются' });
+        } else {
+          const operation = spotify ? deps.spotifyRating!.set(id, value === 'none' ? null : 'like')
+            : deps.yandexRating!.set(id, value === 'none' ? null : value as YandexRating);
+          void operation
+            .then((result) => reply(200, result))
+            .catch((error) => reply(502, { error: error instanceof Error ? error.message : 'Не удалось сохранить отметку' }));
+        }
       } else if (path === '/control/volume') {
         const volumeState = deps.volume?.getState();
         const raw = req.headers['x-volume'];
@@ -68,7 +95,8 @@ export function createControlPanel(deps: ControlDeps, getTrack: () => unknown) {
       res.setHeader('Allow', 'GET');
       reply(405, { error: 'Нужен GET' });
     } else if (path === '/control/state') {
-      reply(200, { ...deps.getState(), track: getTrack(), volume: deps.volume?.getState() ?? null });
+      reply(200, { ...deps.getState(), track: getTrack(), volume: deps.volume?.getState() ?? null,
+        yandexRating: deps.yandexRating?.getState() ?? null, spotifyRating: deps.spotifyRating?.getState() ?? null });
     } else {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
         'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer' });

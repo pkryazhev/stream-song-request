@@ -111,6 +111,27 @@ export class SpotifyPlaybackController {
     return { Authorization: `Bearer ${token}` };
   }
 
+  private async libraryRequest(uri: string, method: 'GET' | 'PUT' | 'DELETE'): Promise<Response> {
+    if (!/^spotify:track:[a-zA-Z0-9]+$/.test(uri)) throw new Error('Некорректный трек Spotify');
+    const url = new URL(`https://api.spotify.com/v1/me/library${method === 'GET' ? '/contains' : ''}`);
+    url.searchParams.set('uris', uri);
+    const response = await this.fetchImpl(url.toString(), { method, headers: await this.authHeaders() });
+    if (response.status === 401 || response.status === 403) throw new Error('Для лайков нужны права Spotify. Повтори авторизацию: npm run auth:spotify.');
+    if (!response.ok) throw this.volumeRequestError(response, `Не удалось обновить избранное Spotify: HTTP ${response.status}`);
+    return response;
+  }
+
+  async isTrackSaved(uri: string): Promise<boolean> {
+    const response = await this.libraryRequest(uri, 'GET');
+    const saved = await response.json() as unknown;
+    if (!Array.isArray(saved) || typeof saved[0] !== 'boolean') throw new Error('Spotify не вернул состояние лайка');
+    return saved[0];
+  }
+
+  async setTrackSaved(uri: string, saved: boolean): Promise<void> {
+    await this.libraryRequest(uri, saved ? 'PUT' : 'DELETE');
+  }
+
   /** Список устройств Spotify Connect, видимых для этого аккаунта прямо сейчас. */
   async listDevices(): Promise<SpotifyDevice[]> {
     const res = await this.fetchImpl('https://api.spotify.com/v1/me/player/devices', {

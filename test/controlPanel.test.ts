@@ -12,9 +12,20 @@ test('control API: local page, protected POST, stale and duplicate skips', async
   let volume = { level: 50, muted: false, supported: true, error: null };
   let volumeTarget: string | undefined;
   let failVolume = false;
+  let rating: 'like' | 'dislike' | null = null;
+  let yandex = true;
+  let spotify = false;
   const server = startNowPlayingOverlay({
     port: 0, getNowPlaying: () => null, spotifyApp: null, getSpotifyPlayback: null, yandexToken: undefined,
     control: {
+      spotifyRating: {
+        getState: () => spotify ? { rating: null, ready: true, busy: false, error: null } : null,
+        set: async () => ({ warning: null }),
+      },
+      yandexRating: {
+        getState: () => yandex ? { rating, ready: true, busy: false, error: null } : null,
+        set: async (_id, value) => { rating = value; return { warning: null }; },
+      },
       volume: {
         getState: () => ({ ...volume, target: volumeTarget }),
         set: async (level, muted) => {
@@ -67,6 +78,28 @@ test('control API: local page, protected POST, stale and duplicate skips', async
     assert.equal(skips, 1);
     assert.equal((await post('2')).status, 200);
     assert.equal(skips, 2);
+    const rate = (id: number, value: string, auth = token) => fetch(`${base}/control/yandex-rating`, {
+      method: 'POST', headers: { 'X-Control-Token': auth, 'X-Playback-Id': String(id), 'X-Rating': value },
+    });
+    assert.equal((await rate(2, 'like', 'bad')).status, 403);
+    assert.equal((await rate(1, 'like')).status, 409);
+    assert.equal((await rate(2, 'invalid')).status, 400);
+    assert.equal((await rate(2, 'like')).status, 200);
+    assert.equal(rating, 'like');
+    assert.equal((await rate(2, 'none')).status, 200);
+    assert.equal(rating, null);
+    yandex = false;
+    assert.equal((await rate(2, 'dislike')).status, 409);
+    const spotifyRate = (id: number, value: string, auth = token) => fetch(`${base}/control/spotify-rating`, {
+      method: 'POST', headers: { 'X-Control-Token': auth, 'X-Playback-Id': String(id), 'X-Rating': value },
+    });
+    assert.equal((await spotifyRate(2, 'like')).status, 409);
+    spotify = true;
+    assert.equal((await spotifyRate(2, 'like', 'bad')).status, 403);
+    assert.equal((await spotifyRate(1, 'like')).status, 409);
+    assert.equal((await spotifyRate(2, 'dislike')).status, 400);
+    assert.equal((await spotifyRate(2, 'like')).status, 200);
+    assert.equal((await spotifyRate(2, 'none')).status, 200);
     const setVolume = (level: string, muted = 'false', auth = token) => fetch(`${base}/control/volume`, {
       method: 'POST', headers: { 'X-Control-Token': auth, 'X-Volume': level, 'X-Muted': muted },
     });
