@@ -1,6 +1,7 @@
 import { normalizeSpotifyPlaylistUri } from '../music/spotifyPlaylistUri.ts';
 import { parseYandexPlaylistUrl, type YandexPlaylistRef } from '../music/yandexPlaylist.ts';
 import { logger } from './logger.ts';
+import { parseYoutubePlaylistUrl } from '../music/youtubePlaylist.ts';
 
 /**
  * Загружает .env (если он есть) и собирает типизированный конфиг из
@@ -60,7 +61,7 @@ if (!Number.isFinite(spotifyPollIntervalMs) || spotifyPollIntervalMs < 500) {
   throw new Error(`SPOTIFY_POLL_INTERVAL_MS должен быть числом от 500 (мс), а задано "${process.env.SPOTIFY_POLL_INTERVAL_MS}".`);
 }
 
-// Перемешивать ли дефолтный плейлист (любой — Spotify или Яндекс) при загрузке
+// Перемешивать ли дефолтный плейлист (YouTube, Spotify или Яндекс) при загрузке
 // в базу. Старое имя YANDEX_DEFAULT_PLAYLIST_SHUFFLE тоже понимается.
 const shuffleDefaultPlaylist =
   (process.env.DEFAULT_PLAYLIST_SHUFFLE ?? process.env.YANDEX_DEFAULT_PLAYLIST_SHUFFLE ?? 'true').trim().toLowerCase() !==
@@ -130,19 +131,24 @@ if (yandexLoudnessTargetLufs !== null && !(yandexLoudnessTargetLufs < 0 && yande
   );
 }
 
-// Необязательно. Дефолтный плейлист из Яндекс Музыки вместо Spotify-плейлиста.
-// Дефолтный плейлист может быть только один: заданы оба — это недосмотр,
-// падаем сразу, а не выбираем за стримера молча. WAVE вместо ссылки — Моя
-// волна (см. music/yandexWave.ts).
+// Фоновый источник может быть только один: YouTube, Spotify или Яндекс.
+// WAVE вместо ссылки Яндекса — Моя волна (см. music/yandexWave.ts).
 const yandexDefaultPlaylistRaw = process.env.YANDEX_DEFAULT_PLAYLIST_URL?.trim() || undefined;
+const youtubeDefaultPlaylistRaw = process.env.YOUTUBE_DEFAULT_PLAYLIST_URL?.trim();
+const defaultPlaylistVariables = ['YOUTUBE_DEFAULT_PLAYLIST_URL', 'YANDEX_DEFAULT_PLAYLIST_URL', 'SPOTIFY_DEFAULT_PLAYLIST_URI']
+  .filter((name) => process.env[name]?.trim());
+if (defaultPlaylistVariables.length > 1) {
+  throw new Error(`Дефолтный плейлист может быть только один. Оставь одну из переменных: ${defaultPlaylistVariables.join(', ')}`);
+}
+const youtubeDefaultPlaylistId = youtubeDefaultPlaylistRaw ? parseYoutubePlaylistUrl(youtubeDefaultPlaylistRaw) : null;
+if (youtubeDefaultPlaylistRaw && !youtubeDefaultPlaylistId) {
+  throw new Error('YOUTUBE_DEFAULT_PLAYLIST_URL: нужна ссылка на обычный YouTube-плейлист с параметром list (не Mix и не «Посмотреть позже»).');
+}
+if (youtubeDefaultPlaylistId && !process.env.YOUTUBE_API_KEY) {
+  throw new Error('YOUTUBE_DEFAULT_PLAYLIST_URL задан, но нет YOUTUBE_API_KEY.');
+}
 let yandexDefaultPlaylist: { kind: 'playlist'; ref: YandexPlaylistRef } | { kind: 'wave' } | null = null;
 if (yandexDefaultPlaylistRaw) {
-  if (process.env.SPOTIFY_DEFAULT_PLAYLIST_URI) {
-    throw new Error(
-      'Заданы сразу YANDEX_DEFAULT_PLAYLIST_URL и SPOTIFY_DEFAULT_PLAYLIST_URI — дефолтный плейлист может быть ' +
-        'только один. Оставь одну из переменных.',
-    );
-  }
   if (!yandexMusicToken) {
     throw new Error('YANDEX_DEFAULT_PLAYLIST_URL задан, но нет YANDEX_MUSIC_TOKEN — без токена треки не сыграть.');
   }
@@ -172,11 +178,11 @@ const vkEnabledRaw = (process.env.VK_VIDEO_ENABLED ?? 'false').trim().toLowerCas
 if (!['true', 'false'].includes(vkEnabledRaw)) throw new Error('VK_VIDEO_ENABLED должен быть true или false');
 const vkEnabled = vkEnabledRaw === 'true';
 if (vkEnabled) logger.info('config', 'ВК Видео: проверка и воспроизведение без авторизации');
-// С дефолтным плейлистом из Яндекса Spotify нужен только для Spotify-заказов,
+// С дефолтным плейлистом из Яндекса или YouTube Spotify нужен только для Spotify-заказов,
 // и SPOTIFY_DEFAULT_PLAYLIST_URI не требуется (задавать его нельзя, см. выше).
 const spotifyEnabled = checkMusicSource(
   'Spotify',
-  yandexDefaultPlaylist
+  yandexDefaultPlaylist || youtubeDefaultPlaylistId
     ? ['SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET']
     : ['SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET', 'SPOTIFY_DEFAULT_PLAYLIST_URI'],
   'интеграция со Spotify отключена, ссылки на Spotify и поиск трека по названию не принимаются.',
@@ -203,8 +209,8 @@ const spotify =
         tokenFilePath: process.env.SPOTIFY_TOKEN_FILE ?? './data/spotify-token.json',
         // Принимает и https://open.spotify.com/playlist/<id>?si=..., и голый
         // <id>, и spotify:playlist:<id> — см. music/spotifyPlaylistUri.ts
-        // null — дефолтный плейлист из Яндекс Музыки (см. выше).
-        defaultPlaylistUri: yandexDefaultPlaylist
+        // null — дефолтный плейлист из Яндекс Музыки или YouTube (см. выше).
+        defaultPlaylistUri: yandexDefaultPlaylist || youtubeDefaultPlaylistId
           ? null
           : normalizeSpotifyPlaylistUri(required('SPOTIFY_DEFAULT_PLAYLIST_URI')),
         // Необязательно. Точное имя устройства из Spotify Connect (см. "node
@@ -298,6 +304,7 @@ export const config = {
     ytdlPath: process.env.YTDLP_PATH || undefined,
   } : undefined,
   youtube: {
+    defaultPlaylistId: youtubeDefaultPlaylistId,
     // undefined — YOUTUBE_API_KEY не задан, заказы по ссылкам на YouTube
     // отклоняются (воспроизведение через mpv при этом нужно Яндекс Музыке).
     apiKey: youtubeEnabled ? required('YOUTUBE_API_KEY') : undefined,
