@@ -21,6 +21,9 @@ import {
   replaceDefaultTracks,
 } from './db/defaultTracks.ts';
 import { startNowPlayingOverlay } from './overlay/nowPlayingOverlay.ts';
+import { MpvVolume } from './music/mpvVolume.ts';
+import { SpotifyVolume } from './music/spotifyVolume.ts';
+import { getSetting, setSetting } from './db/settings.ts';
 
 // Подстраховка: необработанный reject где-то в цепочке промисов не должен
 // ронять всё приложение посреди стрима — логируем и продолжаем работать.
@@ -134,10 +137,17 @@ if (isPointsMode) {
 }
 
 const spotifyController = createSpotifyController();
+const spotifyVolume = spotifyController ? new SpotifyVolume(spotifyController,
+  Number(getSetting('spotify.volume') ?? 50), (level) => setSetting('spotify.volume', String(level))) : null;
+const savedVolume = Number(getSetting('mpv.volume') ?? config.youtube.volume);
+const volume = new MpvVolume({ level: savedVolume, muted: getSetting('mpv.muted') === 'true' }, (state) => {
+  setSetting('mpv.volume', String(state.level));
+  setSetting('mpv.muted', String(state.muted));
+});
 
 const orchestrator = new PlaybackOrchestrator(
   spotifyController,
-  createMpvPlayer(),
+  createMpvPlayer(volume),
   { peekNextPending, markPlaying, markDone },
   {
     peekNext: peekNextDefaultTrack,
@@ -184,6 +194,12 @@ const overlayServer = config.overlay
       control: {
         getState: () => orchestrator.getControlState(),
         skip: (id) => orchestrator.skipFromControl(id),
+        volume: {
+          getState: () => orchestrator.getNowPlaying()?.provider === 'spotify' && spotifyVolume
+            ? spotifyVolume.getState() : { ...volume.getState(), supported: true, target: 'mpv' },
+          set: (level, muted, target) => target?.startsWith('spotify:') && spotifyVolume
+            ? spotifyVolume.set(level, muted, target) : volume.set(level, muted),
+        },
       },
       getNowPlaying: () => orchestrator.getNowPlaying(),
       spotifyApp: config.spotify ? { clientId: config.spotify.clientId, clientSecret: config.spotify.clientSecret } : null,

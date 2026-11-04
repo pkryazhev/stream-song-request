@@ -65,6 +65,9 @@ export interface SpotifyDevice {
   id: string;
   name: string;
   isActive: boolean;
+  volumePercent?: number | null;
+  supportsVolume?: boolean;
+  isRestricted?: boolean;
 }
 
 const NO_ACTIVE_DEVICE_HINT =
@@ -114,10 +117,43 @@ export class SpotifyPlaybackController {
       headers: await this.authHeaders(),
     });
     if (!res.ok) {
-      throw new Error(`Не удалось получить список устройств Spotify: HTTP ${res.status}`);
+      throw this.volumeRequestError(res, `Не удалось получить список устройств Spotify: HTTP ${res.status}`);
     }
-    const data = (await res.json()) as { devices: Array<{ id: string; name: string; is_active: boolean }> };
-    return data.devices.map((d) => ({ id: d.id, name: d.name, isActive: d.is_active }));
+    const data = (await res.json()) as { devices: Array<{ id: string; name: string; is_active: boolean;
+      volume_percent?: number | null; supports_volume?: boolean; is_restricted?: boolean }> };
+    return data.devices.map((d) => ({ id: d.id, name: d.name, isActive: d.is_active,
+      ...(d.volume_percent !== undefined ? { volumePercent: d.volume_percent } : {}),
+      ...(d.supports_volume !== undefined ? { supportsVolume: d.supports_volume } : {}),
+      ...(d.is_restricted !== undefined ? { isRestricted: d.is_restricted } : {}),
+    }));
+  }
+
+  async getVolumeDevice(): Promise<SpotifyDevice | null> {
+    const devices = await this.listDevices();
+    return (this.deviceName
+      ? devices.find((d) => d.name.toLowerCase() === this.deviceName!.toLowerCase())
+      : devices.find((d) => d.isActive)) ?? null;
+  }
+
+  /** Явный device_id привязывает изменение к устройству, показанному в панели. */
+  async setVolume(level: number, deviceId: string): Promise<void> {
+    if (!Number.isInteger(level) || level < 0 || level > 100 || !deviceId) throw new Error('Некорректная громкость Spotify');
+    const url = new URL(this.buildPlayerUrl('/volume', deviceId));
+    url.searchParams.set('volume_percent', String(level));
+    const res = await this.fetchImpl(url.toString(), { method: 'PUT', headers: await this.authHeaders() });
+    this.forgetDeviceOnFailure(res);
+    if (res.ok) return;
+    if (res.status === 403) throw new Error('Spotify запретил менять громкость: проверь Premium, поддержку устройства и право user-modify-playback-state (npm run auth:spotify).');
+    if (res.status === 401) throw new Error('Нужна повторная авторизация Spotify: npm run auth:spotify.');
+    if (res.status === 429) throw this.volumeRequestError(res, 'Spotify ограничил частоту запросов. Повтори позже.');
+    throw new Error(this.playbackErrorMessage('изменить громкость', res.status));
+  }
+
+  private volumeRequestError(res: Response, message: string): Error {
+    const seconds = Number(res.headers.get('Retry-After') ?? 60);
+    return Object.assign(new Error(message), {
+      retryAfterMs: res.status === 429 && Number.isFinite(seconds) ? Math.max(60_000, seconds * 1000) : 60_000,
+    });
   }
 
   /**

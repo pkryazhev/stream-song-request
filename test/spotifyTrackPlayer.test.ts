@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isSameSong, playSpotifyTrack, type SpotifyPlayerApi } from '../src/music/spotifyTrackPlayer.ts';
+import { logger } from '../src/core/logger.ts';
 
 type State = {
   isPlaying: boolean;
@@ -15,6 +16,51 @@ type Step = State | 'error';
 
 const URI = 'spotify:track:ours';
 const OPTS = { pollIntervalMs: 2, startPollIntervalMs: 1 };
+
+test('таймаут во время диагностики: поздний ответ не пишет предупреждение и не скипает следующий трек', async (t) => {
+  let release!: (value: string) => void;
+  let entered!: () => void;
+  const diagnosing = new Promise<void>((resolve) => { entered = resolve; });
+  const details = new Promise<string>((resolve) => { release = resolve; });
+  let skips = 0;
+  const warning = t.mock.method(logger, 'warn', () => {});
+  const session = playSpotifyTrack({
+    getCurrentPlayback: async () => playing(10_000, 200_000, 'spotify:track:previous'),
+    playTrackUri: async () => {},
+    skipToNext: async () => { skips++; },
+    diagnosePlayback: async () => { entered(); return details; },
+  }, URI, { ...OPTS, startupTimeoutMs: 100 });
+  const timedOut = assert.rejects(session.finished, /превышено время запуска/);
+  await diagnosing;
+  await timedOut;
+  release('поздний ответ Spotify');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(skips, 0);
+  assert.equal(warning.mock.callCount(), 0);
+});
+
+test('остановка во время опроса: поздний чужой трек не запускает диагностику', async () => {
+  let release!: (state: State) => void;
+  let entered!: () => void;
+  const polling = new Promise<void>((resolve) => { entered = resolve; });
+  const late = new Promise<State>((resolve) => { release = resolve; });
+  let polls = 0;
+  let diagnostics = 0;
+  const session = playSpotifyTrack({
+    getCurrentPlayback: async () => {
+      if (++polls === 2) { entered(); return late; }
+      return playing(10_000, 200_000, 'spotify:track:previous');
+    },
+    playTrackUri: async () => {},
+    skipToNext: async () => { assert.fail('поздний скип'); },
+    diagnosePlayback: async () => { diagnostics++; return ''; },
+  }, URI, OPTS);
+  await polling;
+  session.stop();
+  release(playing(10_000, 200_000, 'spotify:track:previous'));
+  await session.finished;
+  assert.equal(diagnostics, 0);
+});
 
 const playing = (progressMs: number, durationMs = 200_000, trackUri = URI): State => ({
   isPlaying: true,

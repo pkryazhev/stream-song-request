@@ -9,9 +9,20 @@ test('control API: local page, protected POST, stale and duplicate skips', async
   let playbackId = 1;
   let canSkip = true;
   let skips = 0;
+  let volume = { level: 50, muted: false, supported: true, error: null };
+  let volumeTarget: string | undefined;
+  let failVolume = false;
   const server = startNowPlayingOverlay({
     port: 0, getNowPlaying: () => null, spotifyApp: null, getSpotifyPlayback: null, yandexToken: undefined,
     control: {
+      volume: {
+        getState: () => ({ ...volume, target: volumeTarget }),
+        set: async (level, muted) => {
+          await new Promise((resolve) => setImmediate(resolve));
+          if (failVolume) throw new Error('Spotify отказал в управлении');
+          volume = { ...volume, level, muted };
+        },
+      },
       getState: () => ({ playbackId, canSkip }),
       skip: (id) => {
         if (id !== playbackId || !canSkip) return false;
@@ -56,6 +67,33 @@ test('control API: local page, protected POST, stale and duplicate skips', async
     assert.equal(skips, 1);
     assert.equal((await post('2')).status, 200);
     assert.equal(skips, 2);
+    const setVolume = (level: string, muted = 'false', auth = token) => fetch(`${base}/control/volume`, {
+      method: 'POST', headers: { 'X-Control-Token': auth, 'X-Volume': level, 'X-Muted': muted },
+    });
+    assert.equal((await fetch(`${base}/control/volume`)).status, 405);
+    assert.equal((await setVolume('20', 'false', 'bad')).status, 403);
+    assert.equal((await setVolume('101')).status, 400);
+    assert.equal((await setVolume('-1')).status, 400);
+    assert.equal((await setVolume('NaN')).status, 400);
+    assert.equal((await setVolume('30', 'maybe')).status, 400);
+    assert.equal((await setVolume('30', 'true')).status, 200);
+    assert.equal(volume.level, 30);
+    assert.equal(volume.muted, true);
+    volume.supported = false;
+    assert.equal((await setVolume('90')).status, 409);
+    assert.equal(volume.level, 30);
+    volume.supported = true;
+    volumeTarget = 'spotify:desktop';
+    assert.equal((await setVolume('70')).status, 409, 'старый запрос mpv не меняет Spotify');
+    const spotifyPost = () => fetch(`${base}/control/volume`, { method: 'POST', headers: {
+      'X-Control-Token': token, 'X-Volume': '70', 'X-Muted': 'false', 'X-Volume-Target': 'spotify:desktop',
+    } });
+    assert.equal((await spotifyPost()).status, 200);
+    assert.equal(volume.level, 70, 'сервер дождался Spotify');
+    failVolume = true;
+    const failed = await spotifyPost();
+    assert.equal(failed.status, 502);
+    assert.match((await failed.json()).error, /Spotify/);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

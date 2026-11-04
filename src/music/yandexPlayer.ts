@@ -9,7 +9,7 @@ import {
 import type { YandexPlayback } from './yandexMusicProvider.ts';
 
 /** Громкость и аудио-устройство mpv — те же, что у YouTube-заказов (MPV_VOLUME, MPV_AUDIO_DEVICE). */
-export type YandexPlaybackOptions = Pick<YoutubePlaybackOptions, 'volume' | 'audioDevice'>;
+export type YandexPlaybackOptions = Pick<YoutubePlaybackOptions, 'volume' | 'audioDevice' | 'volumeControl'>;
 
 /**
  * Экспортировано отдельно ради юнит-тестов. Поправка громкости (выравнивание
@@ -34,7 +34,7 @@ export function playYandexTrack(
   resolvePlayback: () => Promise<YandexPlayback>,
   mpvPath = 'mpv',
   options: YandexPlaybackOptions = {},
-  spawn: (command: string, args: string[]) => PlaybackSession = spawnPlaybackProcess,
+  spawn: typeof spawnPlaybackProcess = spawnPlaybackProcess,
 ): PlaybackSession {
   let resolveConfirmed!: () => void;
   const playbackConfirmed = new Promise<void>((resolve) => { resolveConfirmed = resolve; });
@@ -46,7 +46,7 @@ export function playYandexTrack(
   const finished = (async () => {
     const playback = await resolvePlayback();
     if (stopped) return;
-    inner = spawn(mpvPath, buildMpvUrlArgs(playback, options));
+    inner = spawn(mpvPath, buildMpvUrlArgs(playback, options), options.volumeControl);
     void inner.audioStarted?.then(onAudioStarted);
     void inner.playbackConfirmed?.then(resolveConfirmed);
     await inner.finished;

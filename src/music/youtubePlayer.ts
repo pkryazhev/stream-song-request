@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { logger } from '../core/logger.ts';
+import type { MpvVolume } from './mpvVolume.ts';
 
 export interface PlaybackSession {
   /** Резолвится, когда воспроизведение естественным образом завершилось. */
@@ -70,13 +71,15 @@ export function watchPlaybackProgress(streams: (NodeJS.ReadableStream | null)[])
   });
 }
 
-export function spawnPlaybackProcess(command: string, args: string[]): PlaybackSession {
+export function spawnPlaybackProcess(command: string, args: string[], volumeControl?: MpvVolume): PlaybackSession {
   // Раньше stdio был 'ignore' с флагом --really-quiet у mpv — в случае
   // ошибки (например, yt-dlp не смог разобрать ссылку) наружу летел только
   // голый код выхода, без единой подсказки, что именно пошло не так.
   // Теперь вывод процесса перехватывается (а не выводится в наш собственный
   // терминал) и при ненулевом коде выхода прикладывается к ошибке.
-  const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const control = volumeControl?.prepare(args);
+  const child = spawn(command, control?.args ?? args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  control?.bind(child);
   let stopped = false;
   let capturedOutput = '';
 
@@ -186,6 +189,7 @@ export interface YoutubePlaybackOptions {
    * undefined — флаг --volume вообще не передаётся (используется дефолт mpv).
    */
   volume?: number;
+  volumeControl?: MpvVolume;
   /**
    * Имя аудио-устройства, на которое mpv должен выводить звук — например
    * "wasapi/{GUID-устройства}" или просто часть названия вроде "CABLE Input"
@@ -357,6 +361,7 @@ export function playYoutubeUrl(
       mpvPath,
       buildMpvStdinArgs(options),
       YTDLP_WORK_DIR,
+      options.volumeControl,
     );
   if (!preloaded) {
     return withRetryBeforeAudio(() => spawnAttempt(null), YOUTUBE_PLAYBACK_ATTEMPTS, 1000);
@@ -565,9 +570,12 @@ export function spawnYtdlpMpvPipeline(
   mpvPath: string,
   mpvArgs: string[],
   ytdlpCwd?: string,
+  volumeControl?: MpvVolume,
 ): PlaybackSession {
   const ytdlp = spawn(ytdlpPath, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'], cwd: ytdlpCwd });
-  const mpv = spawn(mpvPath, mpvArgs, { stdio: [ytdlp.stdout, 'pipe', 'pipe'] });
+  const control = volumeControl?.prepare(mpvArgs);
+  const mpv = spawn(mpvPath, control?.args ?? mpvArgs, { stdio: [ytdlp.stdout, 'pipe', 'pipe'] });
+  control?.bind(mpv);
 
   let stopped = false;
   let ytdlpStderr = '';

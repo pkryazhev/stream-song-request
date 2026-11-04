@@ -21,6 +21,14 @@
   button:active:not(:disabled) { background: #493873; }
   button:disabled { opacity: .4; cursor: default; }
   button:focus-visible { outline: 2px solid #c5b0ff; outline-offset: 3px; }
+  .volume { display: flex; flex: 1; align-items: center; gap: 7px; min-width: 130px; }
+  #volume { width: 100%; min-width: 40px; margin: 0; accent-color: #aa8ce8; cursor: pointer; }
+  #volume:disabled { opacity: .4; cursor: default; }
+  #volume-value { min-width: 34px; color: #b7bac8; font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
+  #mute { flex-shrink: 0; background: #2c2b36; border-color: #46434f; }
+  #mute[aria-pressed="true"] { color: #d4b9ff; border-color: #a58bd7; }
+  #volume-status { margin: 6px 0 0; color: #b7bac8; font-size: 11px; }
+  #volume-status:empty { display: none; }
   #status { margin: 8px 0 0; color: #b7bac8; font-size: 11px; overflow-wrap: anywhere; }
   #status:empty { display: none; }
 </style>
@@ -37,7 +45,15 @@
   <button id="skip" type="button" title="Пропустить трек" aria-label="Пропустить трек" disabled>
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 4.8a.8.8 0 0 1 1.24-.67l10 6.4a1.75 1.75 0 0 1 0 2.94l-10 6.4A.8.8 0 0 1 5 19.2Z"/><rect x="18" y="4" width="3" height="16" rx="1"/></svg>
   </button>
+  <div class="volume" role="group" aria-label="Громкость музыки">
+    <button id="mute" type="button" title="Выключить звук" aria-label="Выключить звук" aria-pressed="false" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4 6 8H3v8h3l5 4Z"/><path id="sound-waves" d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/><path id="sound-cross" d="m16 9 6 6m0-6-6 6" hidden/></svg>
+    </button>
+    <input id="volume" type="range" min="0" max="100" step="1" value="50" aria-label="Громкость музыки" disabled>
+    <output id="volume-value" for="volume">50%</output>
+  </div>
 </div>
+<p id="volume-status" role="status" aria-live="polite"></p>
 <p id="status" role="status" aria-live="polite"></p>
 </main>
 <script>
@@ -46,6 +62,68 @@
   const artist = document.getElementById('artist');
   const button = document.getElementById('skip');
   const status = document.getElementById('status');
+  const slider = document.getElementById('volume');
+  const mute = document.getElementById('mute');
+  const volumeValue = document.getElementById('volume-value');
+  const volumeStatus = document.getElementById('volume-status');
+  let volumeDraft = { level: 50, muted: false };
+  let volumeDirty = false;
+  let volumeSending = false;
+  let volumeTimer;
+  let volumeRevision = 0;
+  let volumeError = '';
+  function renderVolume() {
+    slider.value = volumeDraft.level;
+    volumeValue.textContent = `${volumeDraft.level}%`;
+    mute.setAttribute('aria-pressed', String(volumeDraft.muted));
+    const label = volumeDraft.muted ? 'Включить звук' : 'Выключить звук';
+    mute.title = label;
+    mute.setAttribute('aria-label', label);
+    document.getElementById('sound-waves').style.display = volumeDraft.muted ? 'none' : '';
+    document.getElementById('sound-cross').style.display = volumeDraft.muted ? '' : 'none';
+  }
+  async function sendVolume() {
+    clearTimeout(volumeTimer);
+    if (volumeSending || !volumeDirty || !state?.volume?.supported) return;
+    volumeSending = true;
+    const revision = volumeRevision;
+    const target = state.volume.target;
+    try {
+      const response = await fetch('/control/volume', { method: 'POST', signal: AbortSignal.timeout(5000),
+        headers: { 'X-Control-Token': token, 'X-Volume': String(volumeDraft.level), 'X-Muted': String(volumeDraft.muted),
+          ...(target ? { 'X-Volume-Target': target } : {}) } });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error);
+      if (state?.volume?.target === target) {
+        volumeError = result.error || '';
+        volumeStatus.textContent = volumeError;
+      }
+    } catch (error) {
+      if (state?.volume?.target === target) {
+        volumeError = error.message || 'Не удалось изменить громкость';
+        volumeStatus.textContent = volumeError;
+      }
+    } finally {
+      volumeSending = false;
+      if (revision === volumeRevision) volumeDirty = false;
+      else sendVolume();
+    }
+  }
+  slider.addEventListener('input', () => {
+    volumeError = '';
+    volumeDraft = { level: Number(slider.value), muted: false };
+    volumeDirty = true; volumeRevision++;
+    renderVolume();
+    clearTimeout(volumeTimer);
+    volumeTimer = setTimeout(sendVolume, 120);
+  });
+  slider.addEventListener('change', sendVolume);
+  mute.addEventListener('click', () => {
+    volumeError = '';
+    volumeDraft.muted = !volumeDraft.muted;
+    volumeDirty = true; volumeRevision++;
+    renderVolume(); sendVolume();
+  });
   let state = null;
   let busy = false;
   let waitingFor = null;
@@ -56,10 +134,26 @@
     return response.json();
   }
   async function refresh() {
+    const revision = volumeRevision;
+    const wasSending = volumeSending;
     try {
       const control = await read('/control/state');
       const track = control.track;
+      const targetChanged = control.volume?.target !== state?.volume?.target;
+      if (targetChanged) {
+        clearTimeout(volumeTimer);
+        volumeDirty = false;
+        volumeRevision++;
+        volumeError = '';
+      }
       state = control;
+      slider.disabled = mute.disabled = !control.volume?.supported;
+      if (control.volume && (targetChanged || (!volumeDirty && !volumeSending && !wasSending && revision === volumeRevision))) {
+        volumeDraft = { level: control.volume.level, muted: control.volume.muted };
+        renderVolume();
+      }
+      if (!control.volume?.supported) volumeStatus.textContent = control.volume?.error || 'Устройство не поддерживает регулировку громкости.';
+      else if (!volumeDirty && !volumeSending) volumeStatus.textContent = volumeError || control.volume.error || '';
       if (waitingFor !== null && waitingFor !== state.playbackId) waitingFor = null;
       title.textContent = track.playing ? track.title : 'Ничего не играет';
       artist.textContent = track.playing ? track.artist : '';
@@ -68,6 +162,7 @@
     } catch {
       state = null;
       button.disabled = true;
+      slider.disabled = mute.disabled = true;
       status.textContent = 'Нет связи с ботом. Проверьте, что он запущен. Если бот перезапускался, обновите панель.';
     }
   }
