@@ -493,7 +493,11 @@ export class PlaybackOrchestrator {
       await session.finished;
     } catch (err) {
       ok = false;
-      logger.error('playback', `Ошибка воспроизведения "${track.title}" — перехожу к следующему треку`, err);
+      if (track.provider === 'youtube' && err instanceof Error && /ERROR:\s*\[youtube\][^\r\n]*:\s*Video unavailable\b/i.test(err.message)) {
+        logger.error('playback', `Не удалось воспроизвести "${track.title}": видео недоступно на YouTube (${track.playUri}) — перехожу к следующему треку`);
+      } else {
+        logger.error('playback', `Ошибка воспроизведения "${track.title}" — перехожу к следующему треку`, err);
+      }
     }
     settle(false);
     clearTimeout(prepareTimer);
