@@ -4,6 +4,7 @@ import { parseYandexPlayUri } from './yandexMusicProvider.ts';
 import { yandexTrackToDefaultTrack, type YandexTrackEntryJson } from './yandexPlaylist.ts';
 import type { NewDefaultTrack } from '../db/defaultTracks.ts';
 import type { DefaultTrackStream } from './playbackOrchestrator.ts';
+import type { RatingEvent } from './yandexRatings.ts';
 
 /**
  * Моя волна Яндекс Музыки как дефолтный плейлист (YANDEX_DEFAULT_PLAYLIST_URL=WAVE).
@@ -50,6 +51,7 @@ export class YandexWave implements DefaultTrackStream {
   private received: string[] = [];
   /** Из какой порции трек (playUri → batchId) — для обратной связи. */
   private batchOf = new Map<string, string>();
+  private sessionOf = new Map<string, string>();
 
   constructor(token: string, fetchImpl: typeof fetch = timedFetch) {
     this.token = token;
@@ -96,6 +98,7 @@ export class YandexWave implements DefaultTrackStream {
       if (this.received.includes(id)) continue;
       this.received.push(id);
       if (batch.batchId) this.batchOf.set(track.playUri, batch.batchId);
+      if (this.sessionId) this.sessionOf.set(track.playUri, this.sessionId);
       tracks.push(track);
     }
     this.received = this.received.slice(-RECEIVED_LIMIT);
@@ -117,6 +120,23 @@ export class YandexWave implements DefaultTrackStream {
       this.batchOf.get(track.playUri),
     );
     this.batchOf.delete(track.playUri);
+    this.sessionOf.delete(track.playUri);
+  }
+
+  /** Фиксирует сессию и порцию до сетевого запроса сохранения отметки. */
+  captureRatingFeedback(playUri: string, playedSec: number): ((event: RatingEvent) => Promise<void>) | undefined {
+    const trackId = parseYandexPlayUri(playUri);
+    const session = this.sessionOf.get(playUri);
+    const batchId = this.batchOf.get(playUri);
+    if (!trackId || !session) return undefined;
+    return async (type) => {
+      const result = await this.post<{ unknownSession?: boolean; terminated?: boolean }>(`/rotor/session/${encodeURIComponent(session)}/feedback`, {
+        event: { type, trackId, timestamp: new Date().toISOString(),
+          ...(type === 'dislike' ? { totalPlayedSeconds: Math.max(0, Math.round(playedSec * 10) / 10) } : {}) },
+        ...(batchId ? { batchId } : {}),
+      });
+      if (result && (result.unknownSession || result.terminated)) throw new Error('Сессия Моей волны закончилась');
+    };
   }
 
   /** Обратная связь не критична: ошибка только пишется в лог, музыка играет дальше. */

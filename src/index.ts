@@ -21,6 +21,13 @@ import {
   replaceDefaultTracks,
 } from './db/defaultTracks.ts';
 import { startNowPlayingOverlay } from './overlay/nowPlayingOverlay.ts';
+import { MpvVolume } from './music/mpvVolume.ts';
+import { SpotifyVolume } from './music/spotifyVolume.ts';
+import { SpotifyLikes } from './music/spotifyLikes.ts';
+import { YandexRatings } from './music/yandexRatings.ts';
+import { YandexWave } from './music/yandexWave.ts';
+import { parseYandexPlayUri } from './music/yandexMusicProvider.ts';
+import { getSetting, setSetting } from './db/settings.ts';
 
 // Подстраховка: необработанный reject где-то в цепочке промисов не должен
 // ронять всё приложение посреди стрима — логируем и продолжаем работать.
@@ -134,10 +141,20 @@ if (isPointsMode) {
 }
 
 const spotifyController = createSpotifyController();
+const spotifyLikes = spotifyController ? new SpotifyLikes(spotifyController) : null;
+const yandexRatings = config.yandexMusic ? new YandexRatings(config.yandexMusic.token) : null;
+const defaultSource = createDefaultPlaylistLoader(spotifyController);
+const spotifyVolume = spotifyController ? new SpotifyVolume(spotifyController,
+  Number(getSetting('spotify.volume') ?? 50), (level) => setSetting('spotify.volume', String(level))) : null;
+const savedVolume = Number(getSetting('mpv.volume') ?? config.youtube.volume);
+const volume = new MpvVolume({ level: savedVolume, muted: getSetting('mpv.muted') === 'true' }, (state) => {
+  setSetting('mpv.volume', String(state.level));
+  setSetting('mpv.muted', String(state.muted));
+});
 
 const orchestrator = new PlaybackOrchestrator(
   spotifyController,
-  createMpvPlayer(),
+  createMpvPlayer(volume),
   { peekNextPending, markPlaying, markDone },
   {
     peekNext: peekNextDefaultTrack,
@@ -146,7 +163,7 @@ const orchestrator = new PlaybackOrchestrator(
     append: appendDefaultTracks,
     count: countDefaultTracks,
   },
-  createDefaultPlaylistLoader(spotifyController),
+  defaultSource,
   {
     pollIntervalMs: config.playback.pollIntervalMs,
     shuffleDefaultPlaylist: config.playback.shuffleDefaultPlaylist,
@@ -181,6 +198,47 @@ registerRequestsToggleHandler(orchestrator, {
 const overlayServer = config.overlay
   ? startNowPlayingOverlay({
       port: config.overlay.port,
+      control: {
+        getState: () => orchestrator.getControlState(),
+        skip: (id) => orchestrator.skipFromControl(id),
+        spotifyRating: spotifyLikes ? {
+          getState: () => {
+            const track = orchestrator.getNowPlaying();
+            return track?.provider === 'spotify' ? spotifyLikes.getState(track.playUri) : null;
+          },
+          set: async (playbackId, rating) => {
+            const track = orchestrator.getNowPlaying();
+            if (track?.provider !== 'spotify' || orchestrator.getControlState().playbackId !== playbackId) throw new Error('Трек сменился. Повтори действие.');
+            return spotifyLikes.set(track.playUri, rating);
+          },
+        } : undefined,
+        yandexRating: yandexRatings ? {
+          getState: () => {
+            const track = orchestrator.getNowPlaying();
+            const id = track?.provider === 'yandex' ? parseYandexPlayUri(track.playUri) : null;
+            return id ? yandexRatings.getState(id) : null;
+          },
+          set: async (playbackId, rating) => {
+            const track = orchestrator.getNowPlaying();
+            const id = track?.provider === 'yandex' ? parseYandexPlayUri(track.playUri) : null;
+            if (!track || !id || orchestrator.getControlState().playbackId !== playbackId) throw new Error('Трек сменился. Повтори действие.');
+            const feedback = track.kind === 'default' && defaultSource instanceof YandexWave
+              ? defaultSource.captureRatingFeedback(track.playUri, track.startedAt === null ? 0 : (Date.now() - track.startedAt) / 1000)
+              : undefined;
+            const result = await yandexRatings.set(id, rating, feedback);
+            if (rating === 'dislike' && config.yandexMusic?.skipOnDislike) {
+              orchestrator.skipFromControl(playbackId);
+            }
+            return result;
+          },
+        } : undefined,
+        volume: {
+          getState: () => orchestrator.getNowPlaying()?.provider === 'spotify' && spotifyVolume
+            ? spotifyVolume.getState() : { ...volume.getState(), supported: true, target: 'mpv' },
+          set: (level, muted, target) => target?.startsWith('spotify:') && spotifyVolume
+            ? spotifyVolume.set(level, muted, target) : volume.set(level, muted),
+        },
+      },
       getNowPlaying: () => orchestrator.getNowPlaying(),
       spotifyApp: config.spotify ? { clientId: config.spotify.clientId, clientSecret: config.spotify.clientSecret } : null,
       getSpotifyPlayback: spotifyController ? () => spotifyController.getCurrentPlayback() : null,

@@ -1,4 +1,5 @@
 import { boundStartup, timedFetch } from './playbackPolicy.ts';
+import type { MpvVolume } from './mpvVolume.ts';
 import { config } from '../core/config.ts';
 import { logger } from '../core/logger.ts';
 import { createSpotifyUserTokenStore } from './spotifyAuth.ts';
@@ -48,7 +49,7 @@ export function createSpotifyController(): SpotifyPlaybackController | null {
  * Всё, что не Spotify, играет mpv: заказы Яндекс Музыки хранятся в очереди
  * как yandex:track:<id>, остальные заказы — ссылки на YouTube или ВК Видео.
  */
-export function createMpvPlayer(): YoutubePlayerLike {
+export function createMpvPlayer(volumeControl?: MpvVolume): YoutubePlayerLike {
   const isVk = (url: string): boolean => parseRequestLink(url).type === 'vk';
   const optionsFor = (url: string): YoutubePlaybackOptions => isVk(url) ? {
     allowedExtractors: VK_EXTRACTOR,
@@ -56,6 +57,7 @@ export function createMpvPlayer(): YoutubePlayerLike {
     pluginDirs: VK_PLUGIN_DIR,
     ytdlPath: config.vk?.ytdlPath ?? config.youtube.ytdlPath,
     volume: config.youtube.volume,
+    volumeControl,
     audioDevice: config.youtube.audioDevice,
   } : youtubeOptions();
   const youtubeOptions = (): YoutubePlaybackOptions => ({
@@ -65,6 +67,7 @@ export function createMpvPlayer(): YoutubePlayerLike {
     ytdlPath: config.youtube.ytdlPath,
     forceIpv4: config.youtube.forceIpv4,
     volume: config.youtube.volume,
+    volumeControl,
     audioDevice: config.youtube.audioDevice,
   });
 
@@ -103,6 +106,7 @@ export function createMpvPlayer(): YoutubePlayerLike {
         const targetLufs = config.yandexMusic?.loudnessTargetLufs ?? null;
         return boundStartup(withRetryBeforeAudio(() => playYandexTrack(() => resolveYandexPlayback(yandexTrackId, token, targetLufs), config.mpvPath, {
           volume: config.youtube.volume,
+          volumeControl,
           audioDevice: config.youtube.audioDevice,
         }), 2, 1000), config.playback.yandexStartupMs);
       }

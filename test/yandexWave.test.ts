@@ -29,6 +29,26 @@ const track = (id: number, extra: Record<string, unknown> = {}) => ({
 /** Дать отработать фоновым запросам обратной связи. */
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+test('Яндекс: события оценки сохраняют сессию и партию после смены трека', async () => {
+  const { calls, fetchImpl } = fakeApi((path) => path === '/rotor/session/new'
+    ? { result: { radioSessionId: 'S1', batchId: 'B1', sequence: [track(1)] } }
+    : { result: 'ok' });
+  const wave = new YandexWave('token', fetchImpl);
+  const [current] = await wave.nextBatch();
+  assert.equal(wave.captureRatingFeedback('yandex:track:999', 1), undefined);
+  const feedback = wave.captureRatingFeedback(current.playUri, 12.34)!;
+  wave.trackEnded(current, 12.34, false);
+  for (const event of ['like', 'unlike', 'dislike', 'undislike'] as const) await feedback(event);
+  const reactions = calls.filter((call) => ['like', 'unlike', 'dislike', 'undislike'].includes(String((call.body.event as any)?.type)));
+  assert.equal(reactions.length, 4);
+  for (const call of reactions) {
+    assert.equal(call.path, '/rotor/session/S1/feedback');
+    assert.equal(call.body.batchId, 'B1');
+    assert.equal((call.body.event as any).trackId, '1');
+  }
+  assert.equal((reactions[2].body.event as any).totalPlayedSeconds, 12.3);
+});
+
 test('YandexWave: первая порция — новая сессия; следующие — по id сессии с уже полученными треками в queue', async () => {
   const { calls, fetchImpl } = fakeApi((path) => {
     if (path === '/rotor/session/new') {

@@ -219,8 +219,9 @@ export function playSpotifyTrack(
       if (midTrack || Date.now() >= deadline) break;
       await sleep(NEAR_END_POLL_MS);
     }
-    logger.warn('playback', `Spotify сам не переключился на трек из очереди ${uri} — жму "следующий"${await diagnose()}`);
+    const details = await diagnose();
     if (stopped) return false;
+    logger.warn('playback', `Spotify сам не переключился на трек из очереди ${uri} — жму "следующий"${details}`);
     await spotify.skipToNext();
     return false;
   };
@@ -248,6 +249,7 @@ export function playSpotifyTrack(
       await sleep(startPollMs);
       if (stopped) return;
       const { pb } = await poll();
+      if (stopped) return;
       if (pb === 'error') {
         if (++errors >= MAX_CONSECUTIVE_ERRORS) throw new Error('Spotify не отвечает — не удалось запустить трек');
         continue;
@@ -263,11 +265,12 @@ export function playSpotifyTrack(
         if (++foreignPolls >= 2 && extraSkips < MAX_EXTRA_SKIPS) {
           extraSkips++;
           foreignPolls = 0;
+          const details = await diagnose();
+          if (stopped) return;
           logger.warn(
             'playback',
-            `Spotify играет не тот трек (${pb.trackUri}) — переключаю на следующий в очереди${await diagnose()}`,
+            `Spotify играет не тот трек (${pb.trackUri}) — переключаю на следующий в очереди${details}`,
           );
-          if (stopped) return;
           await spotify.skipToNext();
         }
         continue;
@@ -292,6 +295,7 @@ export function playSpotifyTrack(
       await sleep(waitMs);
       if (stopped) return;
       const { pb, latencyMs } = await poll();
+      if (stopped) return;
       if (pb === 'error') {
         if (++errors >= MAX_CONSECUTIVE_ERRORS) {
           throw new Error('Spotify перестал отвечать посреди трека — перехожу к следующему');

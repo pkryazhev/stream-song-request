@@ -336,7 +336,8 @@ export const config = {
   },
   spotify,
   yandexMusic: yandexMusicToken
-    ? { token: yandexMusicToken, defaultPlaylist: yandexDefaultPlaylist, loudnessTargetLufs: yandexLoudnessTargetLufs }
+    ? { token: yandexMusicToken, defaultPlaylist: yandexDefaultPlaylist, loudnessTargetLufs: yandexLoudnessTargetLufs,
+        skipOnDislike: (process.env.YANDEX_SKIP_ON_DISLIKE ?? 'true').trim().toLowerCase() !== 'false' }
     : null,
   // Параметры цикла оркестратора воспроизведения (см. playbackOrchestrator.ts).
   playback: {
