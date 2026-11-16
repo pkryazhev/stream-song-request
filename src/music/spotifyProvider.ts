@@ -3,6 +3,34 @@ import { getSpotifyAppToken } from './spotifyAuth.ts';
 import { logger } from '../core/logger.ts';
 import type { TokenStore } from '../core/tokenStore.ts';
 
+/** Диагностика ошибок API без изменения обработки ошибок и повторов запросов. */
+async function fetchWithSpotifyDiagnostics(
+  fetchImpl: typeof fetch,
+  ...args: Parameters<typeof fetch>
+): Promise<Response> {
+  const response = await fetchImpl(...args);
+  if (!response.ok) {
+    let reason: string | null = null;
+    try {
+      const body = await response.clone().json();
+      if (typeof body?.error?.reason === 'string') reason = body.error.reason;
+    } catch {
+      // Пустой или не-JSON ответ не должен скрывать исходную HTTP-ошибку.
+    }
+    const input = args[0];
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const method = args[1]?.method ?? (input instanceof Request ? input.method : 'GET');
+    logger.warn('spotify-api', JSON.stringify({
+      method,
+      endpoint: url.pathname,
+      status: response.status,
+      reason,
+      'Retry-After': response.headers.get('Retry-After'),
+    }));
+  }
+  return response;
+}
+
 export interface SpotifyTrackDetails {
   trackId: string;
   uri: string;
@@ -20,7 +48,7 @@ export async function fetchSpotifyTrackDetails(
 ): Promise<SpotifyTrackDetails | null> {
   const token = await getSpotifyAppToken(clientId, clientSecret, fetchImpl);
 
-  const res = await fetchImpl(`https://api.spotify.com/v1/tracks/${encodeURIComponent(trackId)}`, {
+  const res = await fetchWithSpotifyDiagnostics(fetchImpl, `https://api.spotify.com/v1/tracks/${encodeURIComponent(trackId)}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (res.status === 404) return null;
@@ -102,7 +130,7 @@ export class SpotifyPlaybackController {
     deviceName?: string,
   ) {
     this.userAuth = userAuth;
-    this.fetchImpl = fetchImpl;
+    this.fetchImpl = (...args) => fetchWithSpotifyDiagnostics(fetchImpl, ...args);
     this.deviceName = deviceName;
   }
 
