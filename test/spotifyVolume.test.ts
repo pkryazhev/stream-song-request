@@ -5,6 +5,50 @@ import { SpotifyPlaybackController } from '../src/music/spotifyProvider.ts';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+test('Spotify volume reads once even after time passes and panel writes', async (t) => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  let reads = 0;
+  const writes: number[] = [];
+  const volume = new SpotifyVolume({
+    getVolumeDevice: async () => {
+      reads++;
+      return { id: 'd', name: 'D', isActive: true, supportsVolume: true, volumePercent: 60 };
+    },
+    setVolume: async (level) => { writes.push(level); },
+  });
+  volume.getState();
+  volume.getState();
+  await tick();
+  now += 3_600_000;
+  assert.equal(volume.getState().level, 60);
+  await volume.set(25, false, 'spotify:d');
+  now += 3_600_000;
+  assert.equal(volume.getState().level, 25);
+  await volume.set(25, true, 'spotify:d');
+  now += 3_600_000;
+  assert.equal(volume.getState().muted, true);
+  await tick();
+  assert.deepEqual(writes, [25, 0]);
+  assert.equal(reads, 1);
+});
+
+test('Spotify volume does not poll again after initial read fails', async (t) => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  let reads = 0;
+  const volume = new SpotifyVolume({
+    getVolumeDevice: async () => { reads++; throw new Error('Spotify HTTP 429'); },
+    setVolume: async () => { assert.fail('unexpected write'); },
+  });
+  volume.getState();
+  await tick();
+  now += 3_600_000;
+  assert.match(volume.getState().error!, /429/);
+  await tick();
+  assert.equal(reads, 1);
+});
+
 test('Spotify volume selects configured device, sends authenticated PUT and reads capabilities', async () => {
   const writes: Array<{ url: URL; init?: RequestInit }> = [];
   const api = new SpotifyPlaybackController({ getValidAccessToken: async () => 'token' }, (async (url, init) => {

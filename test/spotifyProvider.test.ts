@@ -2,6 +2,40 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fetchSpotifyTrackDetails, SpotifyPlaybackController } from '../src/music/spotifyProvider.ts';
 import { resetSpotifyAppTokenCache } from '../src/music/spotifyAuth.ts';
+import { logger } from '../src/core/logger.ts';
+
+test('Spotify errors log quota reason and raw Retry-After without credentials', async (t) => {
+  const warnings = t.mock.method(logger, 'warn', () => {});
+  const controller = new SpotifyPlaybackController(
+    { getValidAccessToken: async () => 'secret-token' },
+    (async () => new Response(JSON.stringify({ error: { reason: 'QUOTA_EXCEEDED' } }), {
+      status: 429, headers: { 'Retry-After': '7200' },
+    })) as typeof fetch,
+  );
+  await assert.rejects(controller.getCurrentPlayback(), /HTTP 429/);
+  assert.equal(warnings.mock.calls.length, 1);
+  assert.equal(warnings.mock.calls[0].arguments[0], 'spotify-api');
+  assert.deepEqual(JSON.parse(warnings.mock.calls[0].arguments[1]), {
+    method: 'GET', endpoint: '/v1/me/player', status: 429,
+    reason: 'QUOTA_EXCEEDED', 'Retry-After': '7200',
+  });
+});
+
+test('Spotify diagnostics tolerate non-JSON errors and preserve volume retry delay', async (t) => {
+  const warnings = t.mock.method(logger, 'warn', () => {});
+  const controller = new SpotifyPlaybackController(
+    { getValidAccessToken: async () => 'secret-token' },
+    (async () => new Response('Too many requests', { status: 429 })) as typeof fetch,
+  );
+  await assert.rejects(controller.listDevices(), (error) => {
+    assert.match(error.message, /HTTP 429/);
+    assert.equal(error.retryAfterMs, 60_000);
+    return true;
+  });
+  const details = JSON.parse(warnings.mock.calls[0].arguments[1]);
+  assert.equal(details.reason, null);
+  assert.equal(details['Retry-After'], null);
+});
 
 test('fetchSpotifyTrackDetails возвращает метаданные трека', async () => {
   resetSpotifyAppTokenCache();
